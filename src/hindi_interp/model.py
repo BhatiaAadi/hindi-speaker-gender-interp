@@ -16,11 +16,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class Model:
-    def __init__(self, name="google/gemma-3-4b-pt", device=None, dtype=torch.bfloat16):
+    def __init__(self, name="google/gemma-3-4b-pt", device=None, dtype=torch.bfloat16, multi_gpu=False):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.tok = AutoTokenizer.from_pretrained(name)
-        self.hf = AutoModelForCausalLM.from_pretrained(
-            name, dtype=dtype, attn_implementation="eager").to(self.device).eval()
+        if multi_gpu:  # e.g. fp32 split over several 11 GB cards
+            self.hf = AutoModelForCausalLM.from_pretrained(
+                name, dtype=dtype, attn_implementation="eager", device_map="auto").eval()
+            self.device = "cuda:0"
+        else:
+            self.hf = AutoModelForCausalLM.from_pretrained(
+                name, dtype=dtype, attn_implementation="eager").to(self.device).eval()
         lm = self.hf.model
         self.text = lm.language_model if hasattr(lm, "language_model") else lm
         self.layers = self.text.layers
@@ -111,7 +116,7 @@ class Model:
 
     def logit_lens(self, resid, ids_a, ids_b):
         """LD = logit(a) - logit(b) after applying the final norm + unembedding to `resid` [b, d]."""
-        normed = self.final_norm(resid.to(self.W_U.dtype)).float()
+        normed = self.final_norm(resid.to(self.W_U.device, self.W_U.dtype)).float()
         d = (self.W_U[ids_a].float() - self.W_U[ids_b].float())  # [b, d]
         return (normed * d).sum(-1)
 
@@ -169,9 +174,9 @@ def set_positions(src, positions=None):
     def fn(old):
         new = old.clone()
         if positions is None:
-            new[:] = src.to(old.dtype)
+            new[:] = src.to(old.device, old.dtype)
         else:
-            new[:, positions] = src[:, positions].to(old.dtype)
+            new[:, positions] = src[:, positions].to(old.device, old.dtype)
         return new
     return fn
 

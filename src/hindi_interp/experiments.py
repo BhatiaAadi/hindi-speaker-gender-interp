@@ -77,7 +77,8 @@ def step_sanity(m, items, out):
     # (1) resid[l+1] == resid[l] + attn[l] + mlp[l]
     errs = []
     for l in range(m.n_layers):
-        rec = c["resid"][l].float() + c["attn"][l].float() + c["mlp"][l].float()
+        dev = c["resid"][l + 1].device
+        rec = c["resid"][l].float().to(dev) + c["attn"][l].float().to(dev) + c["mlp"][l].float().to(dev)
         errs.append(((rec - c["resid"][l + 1].float()).norm() / c["resid"][l + 1].float().norm()).item())
     res["resid_identity_max_rel_err"] = max(errs)
     # (2) logits from our own final readout match HF
@@ -88,12 +89,13 @@ def step_sanity(m, items, out):
     u = m.dla_direction(c["resid"][m.n_layers][:, -1], a, b)
     parts = [c["resid"][0][:, -1].float()] + [c["attn"][l][:, -1].float() for l in range(m.n_layers)] \
         + [c["mlp"][l][:, -1].float() for l in range(m.n_layers)]
+    parts = [p.to(u.device) for p in parts]
     dla_total = sum((p * u).sum(-1) for p in parts)
     res["dla_sum_max_abs_err"] = (dla_total - ld_hf).abs().max().item()
     # (4) per-head DLA sums to the attention-block DLA
     l = m.n_layers // 2
     head = head_dla(m, c, l, u)
-    res["head_sum_vs_attn_max_abs_err"] = (head.sum(1) - (c["attn"][l][:, -1].float() * u).sum(-1)).abs().max().item()
+    res["head_sum_vs_attn_max_abs_err"] = (head.sum(1) - (c["attn"][l][:, -1].float().to(u.device) * u).sum(-1)).abs().max().item()
     res["ld_values"] = ld_hf.tolist()
     print(json.dumps(res, indent=2))
     save_json(res, out / "sanity.json")
@@ -107,6 +109,7 @@ def head_dla(m, c, l, u):
     """
     layer = m.layers[l]
     z = c["z"][l][:, -1].float()                                # [b, H, hd]
+    out_device, u = u.device, u.to(z.device)
     W_O = layer.self_attn.o_proj.weight.float()                 # [d, H*hd]
     W_O = W_O.view(m.d_model, m.n_heads, m.head_dim)            # [d, H, hd]
     per_head = torch.einsum("bhk,dhk->bhd", z, W_O)              # [b, H, d]
@@ -115,7 +118,7 @@ def head_dla(m, c, l, u):
     eps = getattr(norm, "eps", getattr(norm, "variance_epsilon", 1e-6))
     inv = torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + eps)    # [b, 1]
     scale = (inv * (1.0 + norm.weight.float()))[:, None, :]      # [b, 1, d]
-    return (per_head * scale * u[:, None, :]).sum(-1)           # [b, H]
+    return (per_head * scale * u[:, None, :]).sum(-1).to(out_device)  # [b, H]
 
 
 # ================================================================== behaviour
@@ -213,7 +216,7 @@ def step_lens(m, items, out):
         comps = [("embed", -1, c["resid"][0][:, -1])] + \
                 [("attn", l, c["attn"][l][:, -1]) for l in range(m.n_layers)] + \
                 [("mlp", l, c["mlp"][l][:, -1]) for l in range(m.n_layers)]
-        comp_vals = torch.stack([(x.float() * u).sum(-1) for _, _, x in comps], 1)  # [b, C]
+        comp_vals = torch.stack([(x.float().to(u.device) * u).sum(-1) for _, _, x in comps], 1)  # [b, C]
         heads = torch.stack([head_dla(m, c, l, u) for l in range(m.n_layers)], 1)  # [b, L, H]
         for k, it in enumerate(cell):
             sign = 1.0 if it["speaker_gender"] != "M" else -1.0   # orient to correct (neutral: fem)
@@ -293,7 +296,7 @@ def step_patching(m, items, out, max_per_cell=40, map_frames=("f01", "f05", "f08
 
                     def fn(old, zsrc=zsrc, sl=sl):
                         new = old.clone()
-                        new[:, -1, sl] = zsrc.to(old.dtype)
+                        new[:, -1, sl] = zsrc.to(old.device, old.dtype)
                         return new
                     acc[key_base][f"head_{direction}_{l}_{h}"] += run([(o_proj, "pre", patch_input(fn))], ids)
         print(f"{tid} {fid}: n={n} S={S} t={time.time() - t0:.0f}s", flush=True)
@@ -446,7 +449,7 @@ def step_diagnose(m, items, out, work, n_random=20, alphas=(0.5, 1, 2, 4, 8)):
 
             def fn(old, sign=sign, vec=vec):
                 new = old.clone()
-                new[:, -1] += (alpha * natural * sign[:, None] * vec[None]).to(old.dtype)
+                new[:, -1] += (alpha * natural * sign[:, None] * vec[None]).to(old.device, old.dtype)
                 return new
             lg = m.logits(ids, [(m.layers[L_star], "pre", patch_input(fn))])
             out_ld += ld_from_logits(lg, a, b).tolist()
@@ -542,7 +545,7 @@ def mlp_default_ablation(m, items, out, k=4):
         for l in pick:
             def fn(old, mo=mean_out[l]):
                 new = old.clone()
-                new[:, -1] = mo.to(old.dtype)
+                new[:, -1] = mo.to(old.device, old.dtype)
                 return new
             hooks.append((m.layers[l].post_feedforward_layernorm, "fwd", patch_output(fn)))
         after += ld_from_logits(m.logits(ids, hooks), f_ids, m_ids).tolist()
@@ -566,6 +569,7 @@ def main():
     ap.add_argument("--work", default="/tmp/hindi_interp_work", help="large intermediate files")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--limit", type=int, default=0, help="debug: keep only this many items per group")
+    ap.add_argument("--multi-gpu", action="store_true", help="split the model over all visible GPUs")
     args = ap.parse_args()
     out, work = Path(args.out), Path(args.work)
     out.mkdir(parents=True, exist_ok=True)
@@ -579,7 +583,7 @@ def main():
                 keep.append(it)
                 cnt[key] += 1
         items = keep
-    m = Model(args.model, dtype=getattr(torch, args.dtype))
+    m = Model(args.model, dtype=getattr(torch, args.dtype), multi_gpu=args.multi_gpu)
     print(f"loaded {args.model}: L={m.n_layers} H={m.n_heads} d={m.d_model} on {m.device}", flush=True)
     for s in args.steps:
         t = time.time()
