@@ -1,0 +1,324 @@
+% Mini-project proposal presentation
+% Compile with XeLaTeX (needed for Devanagari):  xelatex proposal_presentation.tex  (run twice)
+\documentclass[aspectratio=169,10pt]{beamer}
+\usetheme[progressbar=frametitle,numbering=fraction,block=fill]{metropolis}
+
+\usepackage{amsmath}
+\usepackage{fontspec}
+\usepackage{booktabs,tabularx,array}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+
+% ---------- Fonts ----------
+\IfFontExistsTF{Fira Sans}{\setsansfont{Fira Sans}}{}
+\IfFontExistsTF{Noto Sans Devanagari}
+  {\newfontfamily\devfont[Script=Devanagari]{Noto Sans Devanagari}}
+  {\IfFontExistsTF{Kohinoor Devanagari}
+    {\newfontfamily\devfont[Script=Devanagari]{Kohinoor Devanagari}}
+    {\newfontfamily\devfont[Script=Devanagari]{Devanagari MT}}}
+\newcommand{\hi}[1]{{\devfont #1}}
+
+% ---------- Helpers ----------
+\definecolor{accent}{HTML}{EB811B}
+\definecolor{muted}{HTML}{6B6B6B}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\refnote}[1]{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=south west,font=\tiny,text=muted,text width=0.82\paperwidth,align=left]
+      at ([xshift=0.45cm,yshift=0.2cm]current page.south west) {#1};
+  \end{tikzpicture}}
+\tikzset{
+  pstep/.style={draw=mDarkTeal,rounded corners=3pt,fill=mDarkTeal!6,
+    minimum width=3.05cm,minimum height=1.05cm,align=center,font=\scriptsize},
+  arr/.style={-{Stealth[length=2mm]},draw=mDarkTeal,thick}
+}
+
+\title{Where Does the Model Look?}
+\subtitle{Localising Context-Driven Hindi Distinctions in Gemma-3-4B}
+\author{Aaditya Bhatia \and Aryan Chaudhary}
+\institute{Mechanistic Interpretability Mini-Project Proposal\\IIIT Hyderabad}
+\date{October 2026}
+
+\begin{document}
+
+% ======================================================= 1
+\maketitle
+
+% ======================================================= 2
+\begin{frame}{Motivation: English drops what Hindi must say}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\small
+\begin{tabular}{@{}l l l@{}}
+\toprule
+\textbf{English} & \textbf{Hindi must choose} & \textbf{Decided by} \\
+\midrule
+I went & \hi{मैं गया} / \hi{मैं गई} & speaker's gender \\[2pt]
+you & \hi{आप} / \hi{तुम} / \hi{तू} & addressee's status \\[2pt]
+uncle & \hi{चाचा} / \hi{मामा} / \hi{ताऊ} / \hi{फूफा} & side of family, \\
+ & & generation \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.8em}
+The information is \alert{not in the English word}.\\
+The model has to recover it from the \alert{context}.
+\end{column}
+\begin{column}{0.46\textwidth}
+\small
+\textbf{Errors have a social cost}
+\begin{itemize}
+  \item Wrong verb gender \(\rightarrow\) misgenders the speaker
+  \item Wrong pronoun \(\rightarrow\) rude to a teacher or an elder
+  \item Wrong kinship term \(\rightarrow\) names the wrong relative
+\end{itemize}
+\end{column}
+\end{columns}
+\vspace{0.8em}
+\begin{block}{One wrong answer, three possible causes}
+\small
+The cue was \textbf{never encoded}, \textbf{encoded but unused}, or \textbf{overridden by a default}.
+Each needs a different fix, and only causal analysis tells them apart.
+\end{block}
+\end{frame}
+
+% ======================================================= 3
+\begin{frame}{Literature review and gap}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\begin{block}{Behaviour is documented}
+\footnotesize
+\begin{itemize}
+  \item \textbf{Kinship terms:} GPT-OSS-120B \emph{picks} the right term 90.67\% of the time but \emph{produces} it only 36.00\%; strong paternal-side advantage in Hindi.\textsuperscript{1}
+  \item \textbf{First-person gender:} clear agreement gaps in Hindi, French and Arabic across 15 LLMs (2B--70B).\textsuperscript{2}
+  \item \textbf{Honorifics:} LLMs use Hindi and Bengali honorifics more for men than for women.\textsuperscript{3}
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{block}{Mechanisms are not}
+\footnotesize
+\begin{itemize}
+  \item Agreement circuits are mapped for \textbf{person and number} only, including Hindi;\textsuperscript{4,5} not for gender, kinship or honorifics.
+  \item ``Latent language'' findings rest on lenses that \textbf{disagree with each other}, so claims need causal checks.\textsuperscript{6}
+  \item IOI name-mover heads\textsuperscript{7} give a testable template for ``who is speaking''.
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\vspace{0.6em}
+\centering
+\alert{\textbf{Gap:}} no published work localises any of these three distinctions inside a model.
+\refnote{\textsuperscript{1}Pardasani \& Singh, EMNLP 2026 workshop \quad \textsuperscript{2}MORPHOGEN, ACL 2026 \quad \textsuperscript{3}Honorific usages in Wikipedia and LLMs, 2025 \quad \textsuperscript{4}Ferrando \& Costa-juss\`a, EMNLP Findings 2024 \quad \textsuperscript{5}Gidi et al., COLM 2026 \quad \textsuperscript{6}Bayazit et al., EMNLP Findings 2026 \quad \textsuperscript{7}Wang et al., 2022}
+\end{frame}
+
+% ======================================================= 4
+\begin{frame}{Problem statement}
+\begin{block}{}
+When a small LLM makes these Hindi choices correctly, \alert{which context cue causes it}, \alert{where in the network} is that cue carried, and \alert{why does it fail} when it fails?
+\end{block}
+\vspace{0.3em}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l Y l Y l@{}}
+\toprule
+\textbf{Task} & \textbf{Prompt (model predicts \_\_\_)} & \textbf{Correct} & \textbf{Cue the model must use} & \textbf{Minimal-pair edit} \\
+\midrule
+Kinship terms & \hi{मेरी माँ के भाई को मैं \_\_\_ कहता हूँ} & \hi{मामा} & \hi{माँ} (maternal side) + \hi{भाई} (male) & \hi{माँ}\(\to\)\hi{पिता} \;(\hi{मामा}\(\to\)\hi{चाचा}) \\[3pt]
+Speaker gender & \hi{सीमा ने कहा, "मैं कल बाज़ार \_\_\_} & \hi{गई} & speaker's name (\hi{सीमा}, female) & \hi{सीमा}\(\to\)\hi{राहुल} \;(\hi{गई}\(\to\)\hi{गया}) \\[3pt]
+Honorifics & \hi{छात्र ने शिक्षक से पूछा, "\_\_\_} & \hi{आप} & addressee's status (\hi{शिक्षक}) & \hi{शिक्षक}\(\to\)\hi{बेटा} \;(\hi{आप}\(\to\)\hi{तुम}) \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.6em}
+\small
+Each clean prompt has a corrupt twin that changes \textbf{only the cue}, with the same token count, so every difference in the model's behaviour can be traced to that cue.
+\end{frame}
+
+% ======================================================= 5
+\begin{frame}{Research questions and hypotheses}
+\begin{columns}[T]
+\begin{column}{0.4\textwidth}
+\small
+\textbf{Research questions}
+\begin{enumerate}
+  \setlength\itemsep{0.35em}
+  \item[\textbf{RQ1}] \textbf{Behaviour.} How accurate is the model, and what are its errors and defaults with no cue?
+  \item[\textbf{RQ2}] \textbf{Context vs prior.} Does swapping only the cue flip the output?
+  \item[\textbf{RQ3}] \textbf{Localisation.} Which positions, layers, heads and MLPs carry the cue?
+  \item[\textbf{RQ4}] \textbf{Failure diagnosis.} On wrong items, is the cue missing or present but unused? Can an intervention repair it?
+\end{enumerate}
+\end{column}
+\begin{column}{0.56\textwidth}
+\footnotesize
+\textbf{Hypotheses} \textcolor{muted}{(and what would refute them)}
+\begin{enumerate}
+  \setlength\itemsep{0.1em}
+  \item[\textbf{H1}] Most failures are \textbf{readout failures}: the cue is readable but unused; steering repairs part of them.\\
+    {\footnotesize\textcolor{muted}{Refuted if the cue is not readable at the answer position, or steering does no better than random directions.}}
+  \item[\textbf{H2}] Two-step kinship (\hi{पिता की बहन के पति}\(\to\)\hi{फूफा}) computes \hi{बुआ} in the middle layers.\\
+    {\footnotesize\textcolor{muted}{Refuted if swapping \hi{बुआ}\(\to\)\hi{मौसी} does not change \hi{फूफा}\(\to\)\hi{मौसा}.}}
+  \item[\textbf{H3}] With no cue, the model defaults to \textbf{masculine and paternal} forms, written by late MLPs.\\
+    {\footnotesize\textcolor{muted}{Refuted if patching the late MLPs leaves the default in place.}}
+  \item[\textbf{H4}] A few mid-layer \textbf{heads move gender from the speaker's name}, like IOI name movers.\\
+    {\footnotesize\textcolor{muted}{Refuted if, with a distractor name, those heads copy the nearest name.}}
+\end{enumerate}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ======================================================= 6
+\begin{frame}{Models}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l l l Y Y@{}}
+\toprule
+\textbf{Model} & \textbf{Role} & \textbf{Size} & \textbf{Why} & \textbf{Interpretability tools} \\
+\midrule
+Gemma-3-4B (pretrained) & main & 4B, 34 layers & Multilingual (140+ languages); best Hindi tokenizer we tested & TransformerLens; Gemma Scope 2 SAEs on every layer \\[2pt]
+Sarvam-1 & fallback & 2B, 28 layers & Built for 10 Indian languages + English & NNsight (Llama-style); no SAEs \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.7em}
+\begin{columns}[T]
+\begin{column}{0.53\textwidth}
+\footnotesize
+\textbf{Tokenizer check (Gemma-3-4B)}
+\begin{itemize}
+  \item Every target verb, pronoun and postposition is \textbf{one token}: \hi{गया/गई, था/थी, आप/तुम/तू, ने/को/का/की/के}
+  \item \hi{मामा, चाचा, नाना, दादा} are one token; other kinship terms take two, and the second decides gender (\hi{मौ}+\hi{सा} vs \hi{मौ}+\hi{सी})
+  \item Dropped: Gemma-2-2B (2--4 tokens per kinship term), Qwen2.5 (4--6 per word)
+\end{itemize}
+\end{column}
+\begin{column}{0.43\textwidth}
+\footnotesize
+\textbf{Why the pretrained checkpoint:} instruction tuning would confound the mechanism.
+
+\vspace{0.3em}
+\textbf{Go/no-go after week 1, per task:} if Gemma-3-4B gets fewer than half the items right, or cue swaps rarely flip it, that task moves to Sarvam-1.
+
+\vspace{0.3em}
+\textbf{Compute:} Gemma-3-4B in bf16 on an L4 (24\,GB); Sarvam-1 on a T4.
+\end{column}
+\end{columns}
+\refnote{Gemma Team, Gemma 3 Technical Report, 2025 \quad Google DeepMind, Gemma Scope 2, 2025 \quad Sarvam AI, Sarvam-1, 2024}
+\end{frame}
+
+% ======================================================= 7
+\begin{frame}{Datasets: Hindi minimal pairs (\textasciitilde2,300 items)}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l Y c l@{}}
+\toprule
+\textbf{Task} & \textbf{What varies} & \textbf{Size} & \textbf{Clean \(\leftrightarrow\) corrupt} \\
+\midrule
+Kinship terms & 14 one-step relations (\hi{मामा, चाचा, ताऊ, बुआ, फूफा, मौसी, मौसा}, \dots) and 6 two-step ones; definition, English-context and short-story prompts & \textasciitilde800 & \hi{माँ}\(\leftrightarrow\)\hi{पिता}, \hi{भाई}\(\leftrightarrow\)\hi{बहन}, \hi{बड़े}\(\leftrightarrow\)\hi{छोटे} \\[3pt]
+Speaker gender & 40 length-matched names (20 female, 20 male); quoted speaker, self-introduction, English source, no cue; with and without a distractor name & \textasciitilde1,000 & \hi{सीमा}\(\leftrightarrow\)\hi{राहुल} \\[3pt]
+Honorifics & 10 higher-status addressees (\hi{शिक्षक, दादी, डॉक्टर}, \dots) vs 10 close or younger ones (\hi{बेटा, दोस्त, छोटा भाई}, \dots); speaker varied & \textasciitilde500 & \hi{शिक्षक}\(\leftrightarrow\)\hi{बेटा} \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.5em}
+\textbf{Construction rules}
+\begin{itemize}
+  \setlength\itemsep{0.05em}
+  \item Templated, then verified by both authors (native Hindi speakers); honorific items kept only when both agree.
+  \item Clean and corrupt prompts differ only in the cue and have the \textbf{same token count}.
+  \item Answers scored on the exact token each template produces (after a quote mark, \hi{आप} is a different token).
+  \item Train/test splits by \textbf{name and template}; causal analysis uses only items correct on the clean prompt.
+\end{itemize}
+\end{frame}
+
+% ======================================================= 8
+\begin{frame}{Proposed methodology}
+\centering
+\begin{tikzpicture}[node distance=0.32cm]
+  \node[pstep] (s1) {\textbf{1. Behaviour}\\accuracy, errors, defaults\\\textcolor{muted}{RQ1}};
+  \node[pstep,right=of s1] (s2) {\textbf{2. Cue swaps}\\both directions + neutral\\\textcolor{muted}{RQ2}};
+  \node[pstep,right=of s2] (s3) {\textbf{3. Logit lens + DLA}\\first look; defaults (H3)\\\textcolor{muted}{RQ3}};
+  \node[pstep,right=of s3] (s4) {\textbf{4. Activation patching}\\positions, layers, heads\\\textcolor{muted}{RQ3}};
+  \node[pstep,below=0.45cm of s4] (s5) {\textbf{5. Probes + SAEs}\\control tasks, baselines\\\textcolor{muted}{RQ3}};
+  \node[pstep,left=of s5] (s6) {\textbf{6. Diagnose + repair}\\where is the cue? steering\\\textcolor{muted}{RQ4, H1}};
+  \node[pstep,left=of s6] (s7) {\textbf{7. Task-specific tests}\\distractor (H4), swap (H2)\\\textcolor{muted}{H2, H4}};
+  \node[pstep,left=of s7,fill=accent!10,draw=accent] (s8) {\textbf{8. Sarvam-1 fallback}\\steps 1--4 and 6\\\textcolor{muted}{if go/no-go fails}};
+  \draw[arr] (s1) -- (s2); \draw[arr] (s2) -- (s3); \draw[arr] (s3) -- (s4);
+  \draw[arr] (s4) -- (s5); \draw[arr] (s5) -- (s6); \draw[arr] (s6) -- (s7); \draw[arr] (s7) -- (s8);
+\end{tikzpicture}
+
+\vspace{0.5em}
+\raggedright
+\footnotesize
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{itemize}
+  \item \textbf{Logit difference:} \(\mathrm{LD}=\mathrm{logit}(\text{\hi{गई}})-\mathrm{logit}(\text{\hi{गया}})\) at the answer position; accuracy = share with \(\mathrm{LD}>0\), plus top-1 and free generation
+  \item \textbf{Flip rate:} items that flip on a cue swap \(/\) items correct on clean, per direction
+  \item \textbf{Patching effect:} \(\dfrac{\mathrm{LD}_{\text{patched}}-\mathrm{LD}_{\text{corrupt}}}{\mathrm{LD}_{\text{clean}}-\mathrm{LD}_{\text{corrupt}}}\); 1 = fully restored, 0 = no effect
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{itemize}
+  \item \textbf{Selectivity:} probe accuracy \(-\) control-task accuracy, beside majority, random-vector and layer-0 baselines
+  \item \textbf{Repair rate:} wrong items fixed by steering \(/\) wrong items, vs.\ 20 random directions, strength relative to the natural activation
+  \item All numbers with 95\% bootstrap intervals over templates
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ======================================================= 9
+\begin{frame}{Claims we could make, and the evidence each needs}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash\bfseries}p{0.27\textwidth} Y@{}}
+\toprule
+\normalfont\textbf{Claim} & \textbf{Required evidence} \\
+\midrule
+``The output comes from the context'' & The cue swap flips the output in both directions, and the patching effect moves from the cue position to the answer position across layers, on held-out names and templates \\[2pt]
+``Component X carries the cue'' & Restoring X in the corrupt run brings back the logit difference and replacing it in the clean run removes it, far more than random components of the same size \\[2pt]
+``Head H fetches the speaker's gender'' & H attends to the speaker's name, pushes directly towards the correct verb, and changes the answer when patched, including in the distractor test \\[2pt]
+``The distinction is readable at layer L'' & Probe selectivity above the control task and all baselines, with L chosen on a development split \\[2pt]
+``The model uses that information'' & An intervention at L (removing or steering the direction) changes the output \\[2pt]
+``The failure is a readout failure'' & The cue is readable at the answer position on wrong items, and steering at natural strength repairs them more often than random directions, without breaking correct items \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.6em}
+\small
+Attribution alone (lenses, attention weights, direct logit attribution) only suggests hypotheses; \alert{every claim above rests on an intervention}.
+\end{frame}
+
+% ======================================================= 10
+\begin{frame}{Impact and plan}
+\begin{columns}[T]
+\begin{column}{0.47\textwidth}
+\small
+\textbf{Impact}
+\begin{itemize}
+  \setlength\itemsep{0.3em}
+  \item \textbf{Fixable or not:} separates failures that can be repaired at inference time (readout) from ones that need data (cue never encoded).
+  \item \textbf{Bias, located:} finds where masculine and paternal defaults are written.
+  \item \textbf{First causal account} of kinship, speaker gender and honorifics in Hindi; tests whether IOI-style mechanisms appear outside English.
+  \item \textbf{Released:} verified Hindi minimal-pair dataset and reproducible notebooks.
+\end{itemize}
+\end{column}
+\begin{column}{0.5\textwidth}
+\footnotesize
+\textbf{Four-week plan} \textcolor{accent}{\(\blacklozenge\)} = checkpoint
+\vspace{0.2em}
+
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+Week 1 & Data and behaviour, cue swaps (RQ1--2) \textcolor{accent}{\(\blacklozenge\)} go/no-go per task \\
+Week 2 & Logit lens, DLA, activation patching (RQ3) \textcolor{accent}{\(\blacklozenge\)} \\
+Week 3 & Probes, SAE features, task-specific tests \textcolor{accent}{\(\blacklozenge\)} \\
+Week 4 & Failure diagnosis and repair (RQ4); Sarvam-1 fallback; report \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.6em}
+\textbf{Priority}\\
+\textbf{Must:} speaker gender \quad \textbf{Should:} honorifics, one-step kinship\\
+\textbf{Stretch:} two-step kinship (H2), full Sarvam-1 comparison
+\end{column}
+\end{columns}
+\end{frame}
+
+\end{document}

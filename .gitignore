@@ -1,0 +1,26 @@
+# Allowlist: ignore everything at the top level, then re-include project files only.
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/src/
+!/scripts/
+!/data/
+!/results/
+!/report/
+!/proposal/
+
+# Never commit secrets or caches
+.env
+**/__pycache__/
+**/*.pyc
+**/.ipynb_checkpoints/
+results/**/*.pt
+results/**/*.npy
+results/**/acts/
+report/**/*.aux
+report/**/*.log
+report/**/*.out
+report/**/*.bbl
+report/**/*.blg
+/logs/
