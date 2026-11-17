@@ -229,23 +229,24 @@ def fig_steering(res, fig):
     if "layer" not in df:
         df["layer"] = load(res, "probe_layer.json")["best_layer_last"]
     layers = sorted(df.layer.unique())
-    fig_, axs = plt.subplots(1, len(layers), figsize=(W1, 1.7), sharey=True, squeeze=False)
+    fig_, axs = plt.subplots(1, len(layers), figsize=(W1, 1.9), sharey=True, squeeze=False)
     for ax, L in zip(axs[0], layers):
         d0 = df[df.layer == L]
         rnd = d0[d0.direction.str.startswith("random")].groupby("alpha").repair_rate
         ax.fill_between(rnd.mean().index, rnd.min().values, rnd.max().values, color=COL["grey"], alpha=0.3,
-                        lw=0, label="20 random dir. (range)")
+                        lw=0, label="random (range)")
         ax.plot(rnd.mean().index, rnd.mean().values, color=COL["grey"])
         for name, c in (("diff_means", COL["F"]), ("probe", COL["M"])):
             d = d0[d0.direction == name]
             ax.plot(d.alpha, d.repair_rate, color=c, marker="o", ms=3,
-                    label="difference of means" if name == "diff_means" else "probe direction")
+                    label="diff. of means" if name == "diff_means" else "probe")
         ax.set_xscale("log", base=2)
         ax.set_title(f"layer {L}")
-        ax.set_xlabel("strength (× class sep.)")
+        ax.set_xlabel(r"strength $\alpha$")
     axs[0][0].set_ylabel("repair rate")
-    axs[0][0].legend(frameon=False, loc="upper left")
-    fig_.tight_layout()
+    h, l = axs[0][0].get_legend_handles_labels()
+    fig_.legend(h, l, loc="upper center", ncol=3, frameon=False, fontsize=6)
+    fig_.tight_layout(rect=(0, 0, 1, 0.86))
     fig_.savefig(fig / "steering.pdf")
     plt.close(fig_)
 

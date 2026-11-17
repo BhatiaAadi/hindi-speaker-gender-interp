@@ -17,71 +17,86 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
-\usepackage{xcolor}
-\newcommand{\pending}[1]{\textcolor{red}{[#1]}}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+
+\newcommand{\main}{\hi{मैं}}  % the first-person pronoun of the frame
 
 \title{Where Does Gemma Look for the Speaker? \\
-Localising Speaker-Gender Agreement in Hindi First-Person Verbs}
+Tracing Speaker-Gender Agreement in Hindi First-Person Verbs}
 
-\author{Aaditya Bhatia \And Aryan Chaudhary \\
+\author{Aaditya Bhatia \and Aryan Chaudhary \\
   IIIT Hyderabad \\
-  \texttt{\{aaditya.bhatia,aryan.chaudhary\}@research.iiit.ac.in}}
+  \texttt{aaditya.bhatia@research.iiit.ac.in}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-In Hindi, a first-person verb agrees with the speaker's gender (\hi{मैं बाज़ार गई} vs.\ \hi{मैं बाज़ार गया}, ``I went to the market''), so a language model has to recover the speaker from context. We study how Gemma-3-4B (pretrained) does this, using 3,396 minimal-pair prompts in which the only cue is a name. The model is accurate (96.8\% forced choice) and its answers are caused by the cue: swapping the name flips the preferred verb in 96.6\% of items. With no cue, it prefers the masculine form in 83\% of prompts. Logit lens and direct logit attribution show that the cue reaches the answer position only at layers 24--26, through attention layer 25 and the MLPs of layers 23--31, while late MLPs (26, 29, 30, 32) write the masculine default. \pending{patching and heads summary.} Almost all of the model's errors on female speakers come from four names that are also common nouns (\hi{कविता} ``poem'', \hi{रेखा} ``line'', \hi{सीमा} ``border'', \hi{पूजा} ``worship''), and only in one template; there the model behaves as if no cue were given. \pending{probe/steering result for H1.} Code and data: \url{https://github.com/BhatiaAadi/hindi-speaker-gender-interp}.
+A Hindi first-person verb agrees with the speaker's gender (\hi{मैं बाज़ार गई} vs.\ \hi{गया}, ``I went to the market''), so a language model must recover the speaker from the context. We trace how Gemma-3-4B does this on 3,396 token-aligned minimal pairs in which the only cue is a name. The model is accurate (96.8\%), and swapping the name flips its answer in 96.6\% of items. Residual-stream patching shows a three-stage route: the speaker's gender stays at the name until about layer 14; attention layer 14 copies it onto the pronoun \main{} (``I''), where MLP 18 processes it; and a single head, L25H6, reads it from \main{} into the answer position, restoring 75\% of the effect on its own. The copying heads pick the ergative-marked speaker over a distractor name, wherever the distractor stands. With no cue the model prefers masculine verbs (83\%), and zero-ablating four late MLPs (26, 29, 30, 32) at the answer position removes this default (8\% masculine). Most errors come from female names that are also nouns (\hi{कविता} ``poem''): their gender is encoded at the name but never reaches the answer position, so these are not readout failures. Steering at layer 26, where the answer position is first used, repairs all of them, while steering at the layer chosen by probe accuracy does no better than random directions. Code and data: \url{https://github.com/BhatiaAadi/hindi-speaker-gender-interp}.
 \end{abstract}
 
 % =====================================================================
 \section{Introduction}
 
-English \emph{I went} carries no gender, but Hindi has to choose: a woman says \hi{मैं गई} and a man says \hi{मैं गया}. The verb itself gives no hint which form is right; the information must come from the context, for example from who is speaking. Benchmarks show that large language models make systematic errors on this kind of agreement in Hindi~\cite{morphogen2026}, but they only measure behaviour. We ask \emph{why}: which parts of the model carry the speaker's gender from the context to the verb, where a default comes from when there is no cue, and what goes wrong when the model fails.
+English \emph{I went} carries no gender, but Hindi must choose: a woman says \hi{मैं गई} and a man says \hi{मैं गया}. Nothing in the verb's own sentence decides the form; the information has to come from the context, for example from who is quoted as speaking. LLMs make systematic errors on this kind of agreement in Hindi~\cite{morphogen2026}, but benchmarks only measure behaviour. We ask \emph{how} a model gets the gender from the context to the verb, where its default comes from when there is no cue, and what goes wrong when it fails.
 
-Our proposal covered three Hindi phenomena (speaker gender, honorifics and kinship terms) in two models. Following feedback, we narrowed the project to the task with the cleanest minimal pairs, speaker gender, in one model, Gemma-3-4B~\cite{gemma3}, and ran the full pipeline on it. We keep the research questions of the proposal:
-\begin{description}\itemsep0pt
-\item[RQ1 (behaviour).] How accurate is the model, and what does it do with no cue?
-\item[RQ2 (context vs.\ prior).] Is a correct answer caused by the cue?
-\item[RQ3 (localisation).] Which positions, layers, heads and MLPs carry the cue to the answer?
-\item[RQ4 (failures).] When the model is wrong, is the cue missing or present but unused?
-\end{description}
-and three of the four hypotheses: \textbf{H1}, most failures are readout failures (the cue is linearly readable but not used, and steering repairs part of them); \textbf{H3}, with no cue the model defaults to masculine verbs, written by late MLPs; \textbf{H4}, the speaker's gender is fetched by a few attention heads that attend from the answer position to the speaker's name, as name-mover heads do in the IOI circuit~\cite{wang2022}. H2 (two-step kinship) was dropped with the kinship task.
+Our proposal covered three Hindi phenomena (speaker gender, honorifics and kinship terms) in two models. To finish the full causal pipeline in time, we narrowed it to the task with the cleanest minimal pairs, speaker gender, in one model, Gemma-3-4B~\cite{gemma3}. We keep the proposal's research questions: \textbf{RQ1} (behaviour and defaults), \textbf{RQ2} (is a correct answer caused by the cue?), \textbf{RQ3} (which positions, layers, heads and MLPs carry the cue?) and \textbf{RQ4} (when the model is wrong, is the cue missing or unused?), and three of its four hypotheses:
+\textbf{H1}: most failures are readout failures (the cue is linearly readable at the answer position but not used), and steering repairs part of them;
+\textbf{H3}: with no cue the model defaults to masculine verbs, written by late MLPs;
+\textbf{H4}: a few attention heads fetch the speaker's gender by attending from the answer to the speaker's name, like name movers in IOI~\cite{wang2022}.
 
-Our contributions: (i) a token-aligned Hindi minimal-pair dataset for speaker gender, with no-cue and distractor variants; (ii) a localisation of the cue's route in Gemma-3-4B with patching in both directions, logit lens, DLA and probes with control tasks; (iii) a causal account of the masculine default; (iv) a diagnosis of the model's failures, which turn out to be about recognising a name as a person rather than about agreement.
+\paragraph{Findings.} (i) The cue travels name $\to$ \main{} $\to$ answer, not directly from the name to the answer (Figure~\ref{fig:circuit}). (ii) H4 holds in a revised form: the heads that pick the speaker write into the pronoun, not into the answer, and they select the ergative (\hi{ने}) subject rather than the nearest name. (iii) H3 holds: four late MLPs write the masculine default. (iv) H1 fails: the failures we find are transfer failures, in which the cue never reaches the answer position, but they are repairable by steering at the right layer.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  tok/.style={draw,rounded corners=2pt,minimum height=0.55cm,inner sep=2pt,font=\footnotesize},
+  arr/.style={-{Stealth[length=1.6mm]},thick},
+  lab/.style={font=\scriptsize,align=center}]
+\node[tok] (n) {\hi{सीमा} (name)};
+\node[tok,right=0.9cm of n] (p) {\hi{मैं} (``I'')};
+\node[tok,right=0.9cm of p] (a) {\hi{बाज़ार} $\to$ \hi{गई}};
+\draw[arr] (n) -- node[lab,above]{attn L14\\H1, H3} (p);
+\draw[arr] (p) -- node[lab,above]{L25H6} (a);
+\node[lab,below=0.12cm of n] {layers 0--14};
+\node[lab,below=0.12cm of p] {layers 15--25\\MLP 18};
+\node[lab,below=0.12cm of a] {layers 26--33\\MLPs 23--31; default:\\MLPs 26, 29, 30, 32};
+\end{tikzpicture}
+\caption{The route of the speaker's gender in Gemma-3-4B, from residual, component and head patching (\S\ref{sec:route}).}
+\label{fig:circuit}
+\end{figure}
 
 % =====================================================================
 \section{Related work}
 
-\paragraph{Hindi agreement in LLMs.} MORPHOGEN~\cite{morphogen2026} finds gaps in first-person gender agreement in French, Arabic and Hindi across 15 LLMs. Related benchmarks study Hindi honorifics~\cite{honorific2025} and kinship terms~\cite{pardasani2026}. All three measure behaviour only.
+\paragraph{Hindi agreement in LLMs.} MORPHOGEN~\cite{morphogen2026} finds gaps in first-person gender agreement in French, Arabic and Hindi across 15 LLMs; related benchmarks cover Hindi honorifics~\cite{honorific2025} and kinship terms~\cite{pardasani2026}. All of them measure behaviour only.
 
-\paragraph{Agreement circuits.} Circuits for subject--verb agreement in person and number have been traced across languages~\cite{ferrando2024,gidi2026}, and Hindi--Urdu agreement has been modelled as a search process~\cite{zhou2024}. Gender agreement with a speaker who is named only in the context needs something more: the model must find the right referent, as in indirect-object identification~\cite{wang2022}. \citet{vig2020} used causal mediation analysis to locate gender bias in English pronoun resolution; we do the same for a default that shows up in morphology.
+\paragraph{Agreement and referent circuits.} Subject--verb agreement circuits for person and number have been compared across languages~\cite{ferrando2024,gidi2026}, and Hindi--Urdu agreement has been modelled as a search process~\cite{zhou2024}. Our task also needs the right referent, as in indirect-object identification~\cite{wang2022}. \citet{vig2020} used causal mediation analysis to locate gender bias in English; we locate a masculine default that shows up in morphology.
 
-\paragraph{Methods.} We use activation patching~\cite{meng2022,zhang2024,heimersheim2024}, the logit lens~\cite{nostalgebraist2020} and direct logit attribution~\cite{elhage2021}, linear probes with control tasks~\cite{hewitt2019,belinkov2022}, and activation steering~\cite{turner2023}. Lens readings of intermediate layers in multilingual models are contested~\cite{wendler2024,bayazit2026,panchal2026}, so we use the lens only as a first look and back every claim with an intervention. Late MLPs that promote particular tokens~\cite{geva2022} are the natural candidates for writing a default.
+\paragraph{Methods.} We use activation patching~\cite{meng2022,zhang2024,heimersheim2024}, the logit lens~\cite{nostalgebraist2020}, direct logit attribution~\cite{elhage2021}, probes with control tasks~\cite{hewitt2019,belinkov2022} and activation steering~\cite{turner2023}. Lens readings of multilingual models are contested~\cite{wendler2024,bayazit2026,panchal2026}, so we use the lens only as a first look and support each claim with an intervention. Late MLPs that promote output tokens~\cite{geva2022} are natural candidates for writing a default.
 
 % =====================================================================
 \section{Data}
 \label{sec:data}
 
-Every prompt ends right before a gendered first-person verb. Twelve sentence frames cover five verb pairs: \hi{गई/गया} (went, got), \hi{थी/था} (was), \hi{रही/रहा} (progressive), \hi{जाती/जाता} (habitual) and \hi{आई/आया} (came); e.g.\ \hi{मैं कल बीमार} $\to$ \hi{थी}/\hi{था}. The only cue to the speaker's gender is a name. Five \emph{cue templates} place a speaker name before the frame: two quotations (T1 \hi{फ़ोन पर \slot{N} ने कहा, "\ldots}, T2), a self-introduction (T3 \hi{नमस्ते, मेरा नाम \slot{N} है।}), a diary (T4 \hi{यह \slot{N} की डायरी है।}) and a letter (T5 \hi{प्रिय दोस्त, मैं \slot{N} हूँ।}). We use 20 common female and 20 common male names, paired by index; unisex names are excluded. Each name pair is assigned to a train (12), development (4) or test (4) split, so probes are always tested on unseen names.
+Every prompt ends right before a gendered first-person verb. Twelve frames cover five verb pairs: \hi{गई/गया} (went), \hi{थी/था} (was), \hi{रही/रहा} (progressive), \hi{जाती/जाता} (habitual) and \hi{आई/आया} (came), e.g.\ \hi{मैं कल बीमार} $\to$ \hi{थी}/\hi{था} (``I was ill yesterday''). The only cue to the speaker's gender is a name, placed by one of five \emph{cue templates}: two quotations (T1 \hi{फ़ोन पर \slot{N} ने कहा, "}\ldots, ``On the phone N said''; T2 ``Later N told''), a self-introduction (T3 \hi{नमस्ते, मेरा नाम \slot{N} है।}), a diary (T4 \hi{यह \slot{N} की डायरी है।}, ``This is N's diary'') and a letter (T5 \hi{प्रिय दोस्त, मैं \slot{N} हूँ।}). We use 20 common female and 20 common male names, paired by index, excluding unisex names. Name pairs are split into train (12), development (4) and test (4), so probes are always evaluated on unseen names.
 
-Each item has a \emph{corrupt} twin in which the speaker's name is replaced by the other name of its pair. All names and verbs are single tokens in Gemma's tokenizer (we place names mid-sentence, where they get the ``\texttt{\_name}'' token), so clean and corrupt prompts have the same length and differ at exactly one position; a script checks this for every item. This gives 2,400 cue items ($5 \times 12 \times 20 \times 2$). Three \emph{no-cue} templates (e.g.\ \hi{फ़ोन पर उसने कहा}, ``on the phone, s/he said'') give 36 items for measuring the default. Two \emph{distractor} templates add a second name of the other gender, the addressee: in D1 the distractor is closer to the verb (\hi{फ़ोन पर \slot{S} ने \slot{D} से कहा}), in D2 the speaker is (\hi{फ़ोन पर \slot{D} से \slot{S} ने कहा}); 960 items. Native speakers checked all names, frames and templates.
+Each item has a \emph{corrupt} twin in which the speaker's name is replaced by the other name of its pair. All names and verbs are single tokens (names are placed mid-sentence, where they get the ``\texttt{\_name}'' token), so the two prompts have equal length and differ at exactly one position; a script checks this for every item. This gives 2,400 cue items ($5$ templates $\times 12$ frames $\times 20$ pairs $\times 2$ genders). Three \emph{no-cue} templates (e.g.\ \hi{फ़ोन पर उसने कहा}, ``on the phone s/he said'') give 36 items. Two \emph{distractor} templates add an addressee of the other gender, marked by \hi{से}, while the speaker is marked by the ergative \hi{ने}: in D1 the distractor is closer to the verb (\hi{फ़ोन पर \slot{S} ने \slot{D} से कहा}), in D2 the speaker is (\hi{फ़ोन पर \slot{D} से \slot{S} ने कहा}); 960 items.
 
 % =====================================================================
 \section{Method}
 \label{sec:method}
 
-\paragraph{Model and metric.} Gemma-3-4B-pt (34 layers, 8 heads per layer, $d=2560$) in bfloat16, with forward hooks in PyTorch/HF Transformers. Our main metric is the logit difference $\mathrm{LD} = \mathrm{logit}(\text{correct}) - \mathrm{logit}(\text{contrast})$ at the last position. Forced-choice accuracy is $\Pr[\mathrm{LD}>0]$; we also report top-1 accuracy and free generation (6 greedy tokens, scored by the first gendered form produced), because picking the right form and producing it can differ. Confidence intervals are 95\% cluster bootstraps over (template, frame) cells.
+\paragraph{Model and metric.} Gemma-3-4B-pt (34 layers, 8 heads, $d=2560$) in bfloat16, with PyTorch hooks on Hugging Face Transformers. The main metric is the logit difference $\mathrm{LD} = \mathrm{logit}(\text{correct}) - \mathrm{logit}(\text{contrast})$ at the last position. Forced-choice accuracy is $\Pr[\mathrm{LD}>0]$; we also report top-1 accuracy and free generation (6 greedy tokens, scored by the first gendered form), since picking a form and producing it can differ. 95\% confidence intervals come from a cluster bootstrap over (template, frame) cells.
 
-\paragraph{Logit lens and DLA.} Gemma-3 normalises each sublayer output before adding it to the residual stream, so $x_{l+1} = x_l + \mathrm{attn}_l + \mathrm{mlp}_l$ holds exactly for the post-norm outputs. Freezing the final RMSNorm scale of each prompt makes the LD linear in the residual, and each component's direct effect is its dot product with $(\mathbf{1}+w)\odot(W_U[a]-W_U[b]) / \mathrm{rms}(x_L)$. Per-head effects also freeze the post-attention norm. On our prompts the parts sum to the final LD with a maximum error of 0.09 logits in bfloat16 (exact in float32 on a small model).
+\paragraph{Logit lens and DLA.} Gemma-3 normalises each sublayer's output before adding it to the residual stream, so the residual is exactly the sum of the post-norm attention and MLP outputs. Freezing the final RMSNorm scale per prompt makes the LD linear in the residual; a component's direct effect is its dot product with $(\mathbf{1}+w)\odot(W_U[a]-W_U[b])/\mathrm{rms}(x_L)$. Per-head effects also freeze the post-attention norm. On our prompts the parts sum to the final LD within 0.09 logits in bfloat16.
 
-\paragraph{Activation patching.} We use only items whose clean and corrupt runs both have the expected sign (2,322 cue items). We patch in activations from the other run, never zeros, in two directions~\cite{heimersheim2024}: \emph{restoring} a clean activation into the corrupt run (is it sufficient?) and \emph{replacing} a clean activation with the corrupt one (is it necessary?). Effects are normalised so that 0 is the run being patched and 1 the other run: $(\mathrm{LD}_\text{patched} - \mathrm{LD}_\text{corrupt})/(\mathrm{LD}_\text{clean}-\mathrm{LD}_\text{corrupt})$ for restoring and the mirror for replacing. We patch the residual stream at every layer and position, the attention and MLP outputs per layer (at the last position and at all positions), and every head's output at the last position.
+\paragraph{Activation patching.} We keep pairs whose clean prompt is answered correctly and whose corrupt prompt flips the answer (2,244 of 2,400) and patch activations from the other run, never zeros~\cite{zhang2024,heimersheim2024}. The effect $(\mathrm{LD}_\text{patched}-\mathrm{LD}_\text{corrupt})/(\mathrm{LD}_\text{clean}-\mathrm{LD}_\text{corrupt})$ is 0 for no change and 1 for full restoration. Because every pair appears in both orientations (female$\to$male and male$\to$female), the pooled effect of \emph{restoring} a clean activation into the corrupt run equals that of \emph{replacing} it in the clean run, so we report one number. We patch the residual stream at every (layer, position) for four frames per template, attention and MLP outputs per layer, and each head's output, at the answer position and at the pronoun \main{}.
 
-\paragraph{Probes.} Logistic regression (standardised features, $C=0.1$) on the residual stream at every layer, at the answer and at the name position, trained on train names, with the layer $L^\ast$ for later steps chosen on development names and accuracy reported on test names. Following \citet{hewitt2019}, a control task gives each name a random fixed label; its accuracy on held-out items of seen names measures how much the probe can memorise.
+\paragraph{Probes.} Logistic regression (standardised features, $C=0.1$) on the residual stream at every layer and at the name, \main{} and answer positions, trained on train names and tested on test names. The layer $L^\ast$ for later steps is the first layer with the best development accuracy. A control task~\cite{hewitt2019} gives each name a fixed random label; it can only be learned by memorising names, so we score it on new items of seen names.
 
-\paragraph{Diagnosis and steering.} For items the model gets wrong we check whether the probe still reads the correct gender at the answer position. We then add $\alpha\,\lVert\mu_F-\mu_M\rVert$ times a unit direction at layer $L^\ast$, last position, towards the speaker's gender, for the difference-of-means and probe directions and 20 random directions, at $\alpha \in \{0.5,1,2,4,8\}$, and measure how many wrong items become right.
-
-\paragraph{Heads and defaults.} For the heads with the largest patching effects we measure attention from the answer position to the speaker and distractor names, and their direct effect. To test H3 causally we replace the outputs of the four late MLPs that push most strongly towards the masculine form on no-cue prompts with their mean over gender-balanced cue prompts of the same frame, and measure the no-cue LD again.
+\paragraph{Diagnosis and steering.} For wrong items we test whether a probe reads the correct gender at each position. We steer by adding $\alpha\lVert\mu_F-\mu_M\rVert$ times a unit direction to the answer position, towards the speaker's gender, with the difference-of-means direction, the probe direction and 20 random directions, $\alpha\in\{0.5,\dots,8\}$. We steer at $L^\ast$, as planned, and at $L_\text{use}$, the first layer at which patching the answer-position residual restores more than half of the effect.
 
 % =====================================================================
 \section{Results}
@@ -95,59 +110,126 @@ Each item has a \emph{corrupt} twin in which the speaker's name is replaced by t
   \label{fig:behaviour}
 \end{figure}
 
-Gemma-3-4B chooses the right form on 96.8\% of cue items [94.7, 98.3] (Figure~\ref{fig:behaviour}): 95.8\% for female and 97.8\% for male speakers. The verb is the top-1 token in only 62.1\% of items, because the model often prefers a postposition (\hi{मैं कल बाज़ार} $\to$ \hi{में}); in free generation it produces a gendered form in 76.2\% of items, and when it does, the form is right 97.6\% of the time. Swapping the speaker's name flips the preferred form in 96.6\% of items [94.4, 98.3] (female$\to$male 97.7\%, male$\to$female 95.7\%), so correct answers are caused by the cue (RQ2). A distractor of the other gender does not confuse the model: accuracy is 98.5\% when the distractor is nearer to the verb (D1) and 100\% when the speaker is (D2).
+The model chooses the right form on 96.8\% of cue items [94.7, 98.3] (Figure~\ref{fig:behaviour}): 95.8\% for female and 97.8\% for male speakers. The verb is the top-1 token in only 62.1\% of items, because the model often prefers a postposition (\hi{मैं कल बाज़ार} $\to$ \hi{में}); in free generation it produces a gendered form in 76.2\% of items, and that form is right 97.6\% of the time. Swapping the speaker's name flips the preferred form in 96.6\% of items [94.4, 98.3] (97.7\% female$\to$male, 95.7\% male$\to$female), so correct answers are caused by the cue (RQ2). A distractor of the other gender barely matters: accuracy is 98.5\% when it is closer to the verb (D1) and 100\% otherwise (D2).
 
-With no cue, the model prefers the masculine form in 30 of 36 prompts, with a mean LD (feminine $-$ masculine) of $-1.04$ [$-1.34$, $-0.76$] (H3, behavioural part). The exception is frame f02 (\hi{मैं पिछले साल दिल्ली}), where it leans feminine; this frame also accounts for most errors on male speakers, all with LD close to zero and with a postposition, not a verb, as the top token.
+With no cue, the model prefers the masculine form in 30 of 36 prompts, with mean LD (feminine $-$ masculine) $-1.04$ [$-1.34$, $-0.76$]. The exception is frame f02 (\hi{मैं पिछले साल दिल्ली}, ``last year I [went to] Delhi''), which leans feminine. This frame accounts for most errors with male speakers, all with LD near zero and a postposition, not a verb, as the top token.
 
-\subsection{Where the cue is written (RQ3)}
+\subsection{The route of the cue (RQ3, H4)}
+\label{sec:route}
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/logit_lens.pdf}
+  \includegraphics[width=\columnwidth]{figures/resid_map_T1_f01_denoise.pdf}\\[-2pt]
+  \includegraphics[width=\columnwidth]{figures/resid_positions.pdf}
+  \caption{Top: effect of patching the residual stream at each layer and position, for T1 \hi{फ़ोन पर \slot{N} ने कहा, "मैं कल बाज़ार} (38 pairs). Bottom: the same at the name, \main{} and answer positions, averaged over 20 template--frame cells.}
+  \label{fig:resid}
+\end{figure}
+
+Residual patching (Figure~\ref{fig:resid}) shows the cue in three places in turn. Up to layer 6 all of it is at the name. From layer 9 the effect at the name halves and part of it is spread over the following tokens (\hi{ने}, \hi{है}). At layer 15 it moves onto the frame's pronoun \main{}, where patching restores 62\% of the effect, and 75--81\% from layer 16 to 25. From layer 26 on, the answer position alone carries it (98\%). Before layer 26, patching the answer position restores at most 20\%. The same picture holds in all 20 cells we mapped, for every template.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/attn_mlp.pdf}\\[-2pt]
+  \includegraphics[width=\columnwidth]{figures/heads.pdf}
+  \caption{Patching attention and MLP outputs (top) and single heads (bottom), at the answer position and at \main{}.}
+  \label{fig:components}
+\end{figure}
+
+\paragraph{Name $\to$ \main{}.} Patching component outputs at \main{} (Figure~\ref{fig:components}, right) points to attention layer 14 (effect 0.36), mostly heads L14H1 (0.20) and L14H3 (0.17), followed by MLP 18 (0.76) and MLP 23 (0.23). L14H3 is the clearest speaker head: from \main{} it puts 0.29 of its attention on the speaker's name. On distractor prompts it chooses the speaker whether the distractor is nearer (D1: 0.29 on the speaker vs.\ 0.04 on the distractor) or farther (D2: 0.50 vs.\ 0.02). L17H0 does the same (D1: 0.17 vs.\ 0.06), while L14H1 prefers the speaker clearly only in D2 (0.12 vs.\ 0.03; D1: 0.07 vs.\ 0.05). Patching at \main{} on distractor items finds the same components (attention 14: 0.38, MLP 18: 0.91). The speaker is therefore selected by its role, the ergative \hi{ने} subject, not by position.
+
+\paragraph{\main{} $\to$ answer.} At the answer position a single head dominates: L25H6 restores 0.75 of the effect (0.71--0.78 in every template), with a direct effect of $+0.82$ logits. It puts 0.69 of its attention on \main{} and almost none on the name (0.005), and the same holds with a distractor (0.76 on \main{}, $\le 0.003$ on either name). The MLPs at the answer position (26: 0.37; 23, 25: 0.21) amplify the signal once it arrives. H4 thus holds in a revised form: there are speaker heads, but they write into the pronoun, and the head that feeds the verb reads the pronoun, not the name.
+
+\paragraph{Lens and DLA.} The logit lens (Figure~\ref{fig:lens}) agrees: until layer 23 the female-speaker curve follows the no-cue curve, and the LD reaches its final value between layers 24 and 27. DLA attributes the jump to attention layer 25 ($+0.85$) and the MLPs of layers 23--31.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/logit_lens.pdf}\\[-2pt]
   \includegraphics[width=\columnwidth]{figures/dla.pdf}
-  \caption{Top: logit lens at the answer position. Until layer 23 the female-speaker curve follows the no-cue curve: the cue has not reached the answer. Bottom: direct effect of each layer's attention and MLP output on the LD (cue items, oriented to the correct form), and of each MLP on no-cue items (feminine $-$ masculine).}
+  \caption{Top: logit lens at the answer position (layers $\ge 8$). Bottom: direct effect of each layer's attention and MLP on the LD for cue items (oriented to the correct form), and of each MLP on no-cue items (feminine $-$ masculine).}
   \label{fig:lens}
 \end{figure}
 
-The logit lens (Figure~\ref{fig:lens}, top) shows a masculine lean in the middle layers that is the same for female speakers and no-cue prompts, and the same with the opposite sign for male speakers; the name has no visible effect until layer 23. Between layers 24 and 27 the LD jumps to its final value, a layer earlier for female than for male speakers. DLA (Figure~\ref{fig:lens}, bottom) attributes this jump to attention layer 25 (mean direct effect $+0.85$) and the MLPs of layers 23--31 (MLP 26: $+0.86$), with smaller contributions from attention layers 32--33. The last two MLPs push slightly against the correct form.
-
-\pending{Residual patching map: name position -> last position crossover layer. Attn vs MLP patching. Heads.}
-
-\subsection{Speaker heads and the distractor test (H4)}
-
-\pending{heads summary}
-
-\subsection{The masculine default (H3)}
-
-On no-cue prompts, DLA attributes the masculine lean to MLPs 26 ($-0.58$), 29 ($-0.43$), 30 ($-0.40$) and 32 ($-0.64$), partly offset by MLP 33 ($+0.86$); the logit lens turns masculine from layer 27 on. \pending{Ablation: LD before/after, share masculine before/after.}
-
-\subsection{Failures (RQ4, H1)}
-\label{sec:failures}
-
-Of the 85 wrong items (cue and distractor), 46 are in the diary template with the female names \hi{कविता}, \hi{रेखा}, \hi{सीमा} and \hi{पूजा}, each also a common noun (poem, line, border, worship). For these names the model is right on 4\% of diary items (mean LD $-1.64$, close to the no-cue default) but on 98--100\% of items in the other templates; for other female names the diary template is 98\% correct. \hi{यह कविता की डायरी है} can be read as ``this is the poem's diary'', and the model then behaves as if no speaker were named. Seven of the eight distractor errors also have \hi{कविता} as the speaker. The remaining errors are the low-confidence f02 items above. The failures are therefore not about agreement: they are about whether the name is recognised as a person.
-
-\pending{Probe accuracy on wrong items; ambiguity table; steering repair vs random.}
+\paragraph{Probes.} The speaker's gender is linearly readable on unseen names almost everywhere (Figure~\ref{fig:probes}): at the name from layer 3, at \main{} from layer 9, and at the answer position from layer 11 (above 97\% from layer 7). From layer 10 on, the control task at the answer position stays at 78--90\%, so the probe can also memorise names; generalisation to unseen names is the stronger test. Readability is far ahead of use: the answer position is readable from layer 7, but patching it there has a sizeable effect only from layer 21 and a full effect from layer 26.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/probes.pdf}
-  \caption{Probe accuracy on held-out names by layer at the answer and name positions, and control-task accuracy.}
+  \caption{Probe accuracy on held-out names by layer, and control-task accuracy (new items of seen names).}
   \label{fig:probes}
 \end{figure}
+
+\subsection{The masculine default (H3)}
+
+On no-cue prompts DLA attributes the masculine lean to MLPs 26 ($-0.58$), 29 ($-0.43$), 30 ($-0.40$) and 32 ($-0.64$), partly offset by MLP 33 ($+0.86$; Figure~\ref{fig:lens}, bottom). On cue items, MLPs 26, 29 and 30 push towards the masculine form for male speakers ($+1.46$, $+0.64$, $+0.60$) but barely act for female speakers ($+0.24$, $+0.08$, $+0.04$), while MLP 32 pushes towards masculine for both. Zero-ablating these MLPs at the answer position (Table~\ref{tab:default}) removes the default: with all four ablated, the no-cue LD goes from $-1.04$ to $+0.94$ and the share of masculine preferences from 83\% to 8\%. Ablating four earlier MLPs (19--22) does not (92\%). Mean-ablation over gender-balanced cue prompts, our first test, barely moved the default ($-1.04 \to -0.94$), presumably because the mean output of these MLPs is itself masculine-leaning. H3 is supported: the default is written late, by MLPs that are switched off when the speaker is known to be female.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+Zeroed MLPs & LD$_{F-M}$ & \% masc. \\
+\midrule
+none & $-1.04$ & 83 \\
+32 & $-0.54$ & 69 \\
+26, 29, 30 & $+0.02$ & 47 \\
+26, 29, 30, 32 & $+0.94$ & 8 \\
+control: 19, 20, 21, 22 & $-1.32$ & 92 \\
+\bottomrule
+\end{tabular}
+\caption{The masculine default on the 36 no-cue prompts after zero-ablating late MLPs at the answer position.}
+\label{tab:default}
+\end{table}
+
+\subsection{Failures (RQ4, H1)}
+\label{sec:failures}
+
+Of the 85 wrong items, 46 are diary items (T4) with the female names \hi{कविता}, \hi{रेखा}, \hi{सीमा} and \hi{पूजा}, each also a common noun (poem, line, border, worship). For these names the model is right on 2 of 48 diary items (mean LD $-1.64$, close to the no-cue default) but on 98--100\% of items in the other templates, and other female names are 98\% right in the diary template. \hi{यह कविता की डायरी है} can be read as ``this is the poem's diary'', and the model then behaves as if no speaker were named. All seven distractor errors also have \hi{कविता} as the speaker. The other errors are the low-confidence f02 items. These failures are not about agreement but about recognising the name as a person.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Layer & name & \main{} & answer \\
+\midrule
+10 & 1.00 & 0.75 & 0.35 \\
+15 & 0.25 & 1.00 & 0.62 \\
+20 & 1.00 & 0.62 & 0.56 \\
+25 & 0.75 & 0.50 & 0.38 \\
+26 & 1.00 & 0.50 & 0.00 \\
+30 & 1.00 & 0.25 & 0.02 \\
+\bottomrule
+\end{tabular}
+\caption{Probe accuracy (reading ``female'') on the 48 diary items with noun-like names, 46 of which the model gets wrong. Probes are trained without these names' pairs; the same probes are 98--100\% accurate on these names in the other templates. With four names, accuracies move in steps of about 0.25.}
+\label{tab:ambig}
+\end{table}
+
+\paragraph{Where the cue is lost.} Probes trained without the ambiguous names' pairs read the speaker as female at the name position at most layers, but not at the answer position: from layer 26 on they read male in 98--100\% of these items (Table~\ref{tab:ambig}). At \main{} the reading is mixed and fades with depth. The cue is encoded but never transferred, so these are not readout failures, and H1 is not supported. A probe trained on all train names, which include three of the four ambiguous names, reads the correct gender on 99\% of wrong items at layer 26; it recognises the names, not the model's state, which shows why the held-out split matters.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/steering.pdf}
+  \caption{Share of the 85 wrong items repaired by steering at the answer position, at $L^\ast{=}10$ and at $L_\text{use}{=}26$.}
+  \label{fig:steering}
+\end{figure}
+
+\paragraph{Repair.} Steering where the answer position is used repairs the failures (Figure~\ref{fig:steering}). At $L_\text{use}=26$, adding the difference-of-means direction at half the natural class separation turns 96\% of wrong items right (100\% from $\alpha=1$), and the verb becomes the top-1 token in 41--49\% (for $\alpha\le 2$); random directions of the same norm repair 8--11\% on average, and no right item becomes wrong. At $L^\ast=10$, chosen as the first layer with the best probe accuracy, the difference-of-means and probe directions repair at most 8\%, no more than random directions (mean 1--5\%, best 15\%). Probe accuracy alone would have picked a layer the model does not use for this decision.
 
 % =====================================================================
 \section{Discussion}
 
-\pending{discussion}
+\paragraph{Gender goes through the pronoun.} The model does not fetch the speaker's name when it writes the verb. It first attaches the speaker's gender to \main{}, the subject of the verb, and the verb reads it from there, much as Hindi grammar describes agreement with the subject. This makes the mechanism independent of how the speaker was introduced: the same heads and MLPs carry the cue in quotations, introductions, diaries and letters.
+
+\paragraph{Hypotheses.} H3 is supported causally. H4 is supported in a revised form: speaker heads exist (L14H1, L14H3) and select the ergative subject over a nearer distractor, but they write into \main{}, and a separate head (L25H6) moves the gender to the answer. H1 is not supported for the failures we found: the cue is lost on the way, not ignored at the end, yet one direction at the right layer repairs all of them. More generally, linear readability was a poor guide: the speaker's gender is readable at the answer position from layer 7, but patching it there matters little before layer 26.
+
+\paragraph{Scope.} Compared with the proposal we dropped honorifics, kinship terms (and H2), the Sarvam-1 comparison and the Gemma Scope SAE features. The same pipeline applies to them directly, and the pronoun route suggests one specific test for honorifics: whether the addressee's status is likewise attached to \hi{आप}/\hi{तुम} before the verb reads it.
 
 % =====================================================================
 \section*{Limitations}
 
-We study one pretrained model and one phenomenon. Our prompts are short and templated; real text gives the speaker in many other ways (pronouns, earlier dialogue, descriptions). We use binary gender because Hindi verb morphology has two forms; this says nothing about how models should handle speakers whose gender is unknown or non-binary, for which the masculine default we find is itself a concern. The ambiguous-name analysis was found after the fact, from the error analysis, and rests on four names; it should be tested with a dataset designed for it. The logit lens is known to be unreliable in early layers, which we only read for orientation. We did not use sparse autoencoders, and our head analysis looks only at the answer position.
+We study one pretrained model and one phenomenon on short templated prompts; in real text the speaker can be given by pronouns, earlier turns or descriptions. Hindi verbs have two gender forms, so our data is binary; we make no claim about how models should treat speakers whose gender is unknown or non-binary, for whom the masculine default we find is itself a problem. The noun-like name finding comes from error analysis after the fact and rests on four names; it needs a dataset designed for it. Residual maps and pronoun patching use four of the twelve frames. Zero-ablation is off-distribution and may overstate a component's role; mean-ablation gave a much weaker effect. The early-layer logit lens is unreliable, and we read it only for orientation. We did not use sparse autoencoders.
 
 \section*{Ethics statement}
 
-The masculine default we localise is a form of gender bias: a speaker with no stated gender is treated as male. All names in our data are common first names, not real people. We used AI assistants for coding and writing support.
+The default we localise is a form of gender bias: an unnamed speaker is treated as male. All names in our data are common first names, not real people. We used AI assistants for coding and writing support.
 
 \bibliography{references}
 
