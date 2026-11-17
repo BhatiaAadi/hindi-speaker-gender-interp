@@ -13,6 +13,8 @@ Steps (run in this order; later steps read earlier outputs):
     heads       candidate speaker heads: attention, distractor test,
                 and late-MLP ablation for the masculine default            (H3, H4)
     ambig       probe readability on female names that are also nouns      (H1)
+    route       follow-up: the cue's route name -> मैं -> answer; probes, attention and
+                patching at मैं; zero-ablation of late MLPs                  (RQ3, H1, H3, H4)
 """
 import argparse
 import json
@@ -424,22 +426,25 @@ def step_probes(m, items, out, work):
 
 
 # =================================================================== diagnose
+def use_layer(out, thresh=0.5):
+    """First layer at which patching the last-position residual restores > thresh of the effect."""
+    maps = json.loads((out / "patching_resid_maps.json").read_text())
+    eff = np.mean([[(v[-1] - mp["corrupt"]) / (mp["clean"] - mp["corrupt"]) for v in mp["denoise"]]
+                   for mp in maps.values()], 0)
+    return int(np.argmax(eff > thresh))
+
+
 def step_diagnose(m, items, out, work, n_random=20, alphas=(0.5, 1, 2, 4, 8)):
+    """Readability and steering at L* (best probe layer on dev) and at the first layer where the
+    answer position is causally used (from residual patching)."""
     beh = load_beh(out).set_index("id")
     L_star = json.loads((out / "probe_layer.json").read_text())["best_layer_last"]
+    L_use = use_layer(out)
     acts = np.load(work / "acts_cue.npz")
     id2row = {int(i): k for k, i in enumerate(acts["ids"])}
     byid = {it["id"]: it for it in items}
     tr_ids = [i for i in acts["ids"] if byid[int(i)]["split"] == "train"]
-    Xtr = acts["last"][[id2row[int(i)] for i in tr_ids], L_star].astype(np.float32)
     ytr = np.array([byid[int(i)]["speaker_gender"] == "F" for i in tr_ids], int)
-    clf, _ = fit_probe(Xtr, ytr, Xtr, ytr)
-    mu_f, mu_m = Xtr[ytr == 1].mean(0), Xtr[ytr == 0].mean(0)
-    dom = mu_f - mu_m
-    natural = float(np.linalg.norm(dom))                 # class-mean separation along the direction
-    v_dom = dom / np.linalg.norm(dom)
-    v_probe = clf.direction()                            # back to raw activation space
-    v_probe = v_probe / np.linalg.norm(v_probe)
 
     # Wrong items: cue items and distractor items the model gets wrong on the clean prompt.
     wrong = [byid[i] for i in beh.index if beh.loc[i, "group"] in ("cue", "distractor")
@@ -448,61 +453,69 @@ def step_diagnose(m, items, out, work, n_random=20, alphas=(0.5, 1, 2, 4, 8)):
              and bool(beh.loc[i, "correct"])]
     rng = np.random.default_rng(0)
     right_sample = [right[i] for i in rng.choice(len(right), min(400, len(right)), replace=False)]
-    res = dict(L_star=L_star, natural_norm=natural, n_wrong=len(wrong), n_right=len(right))
+    res = dict(L_star=L_star, L_use=L_use, n_wrong=len(wrong), n_right=len(right),
+               wrong_by_group=pd.Series([it["template"] for it in wrong]).value_counts().to_dict())
     if not wrong:
         save_json(res, out / "diagnose.json")
         print("no wrong items")
         return
-
-    # (a) Is the speaker's gender readable at the answer position on wrong items?
-    def readable(sub):
-        Xw, _ = collect_acts(m, sub, positions=("last",))
-        yw = np.array([it["speaker_gender"] == "F" for it in sub], int)
-        return float((clf.predict(Xw["last"][:, L_star].astype(np.float32)) == yw).mean())
-    res["probe_acc_on_wrong"] = readable(wrong)
-    res["probe_acc_on_right"] = readable(right_sample)
-    res["wrong_by_group"] = pd.Series([it["template"] for it in wrong]).value_counts().to_dict()
-
-    # (b) Steering at L_star, last position, towards the speaker's gender.
-    dirs = {"diff_means": v_dom, "probe": v_probe}
-    rs = np.random.default_rng(1)
-    for r in range(n_random):
-        v = rs.standard_normal(m.d_model)
-        dirs[f"random{r}"] = v / np.linalg.norm(v)
-
-    def steer_ld(sub, v, alpha):
-        out_ld, out_top = [], []
-        for _, cell in sorted(cells(sub).items()):
-            ids = m.encode([it["prompt"] for it in cell])
-            a, b = ids_for(m, cell, "correct", "contrast")
-            sign = torch.tensor([1.0 if it["speaker_gender"] == "F" else -1.0 for it in cell], device=m.device)
-            vec = torch.tensor(v, device=m.device, dtype=torch.float32)
-
-            def fn(old, sign=sign, vec=vec):
-                new = old.clone()
-                new[:, -1] += (alpha * natural * sign[:, None] * vec[None]).to(old.device, old.dtype)
-                return new
-            lg = m.logits(ids, [(m.layers[L_star], "pre", patch_input(fn))])
-            out_ld += ld_from_logits(lg, a, b).tolist()
-            out_top += (lg.argmax(-1) == a).tolist()
-        return np.array(out_ld), np.array(out_top)
+    Xw_all, meta_w = collect_acts(m, wrong, positions=("last",))
+    Xr_all, meta_r = collect_acts(m, right_sample, positions=("last",))
+    yw = np.array([it["speaker_gender"] == "F" for it in meta_w], int)   # same order as the activations
+    yr = np.array([it["speaker_gender"] == "F" for it in meta_r], int)
 
     rows = []
-    for name, v in dirs.items():
-        for alpha in alphas:
-            ldw, topw = steer_ld(wrong, v, alpha)
-            ldr, topr = steer_ld(right_sample, v, alpha)
-            rows.append(dict(direction=name, alpha=alpha, repair_rate=float((ldw > 0).mean()),
-                             repair_top1=float(topw.mean()), right_stay_right=float((ldr > 0).mean()),
-                             right_top1=float(topr.mean())))
-        print(rows[-1], flush=True)
+    for L in sorted({L_star, L_use}):
+        Xtr = acts["last"][[id2row[int(i)] for i in tr_ids], L].astype(np.float32)
+        clf, _ = fit_probe(Xtr, ytr, Xtr, ytr)
+        dom = Xtr[ytr == 1].mean(0) - Xtr[ytr == 0].mean(0)
+        natural = float(np.linalg.norm(dom))             # class-mean separation along the direction
+        v_probe = clf.direction()                        # back to raw activation space
+        dirs = {"diff_means": dom / natural, "probe": v_probe / np.linalg.norm(v_probe)}
+        rs = np.random.default_rng(1)
+        for r in range(n_random):
+            v = rs.standard_normal(m.d_model)
+            dirs[f"random{r}"] = v / np.linalg.norm(v)
+
+        # (a) Is the speaker's gender readable at the answer position on wrong items?
+        res[f"L{L}"] = dict(natural_norm=natural,
+                            probe_acc_on_wrong=float((clf.predict(Xw_all["last"][:, L]) == yw).mean()),
+                            probe_acc_on_right=float((clf.predict(Xr_all["last"][:, L]) == yr).mean()))
+
+        # (b) Steering at layer L, last position, towards the speaker's gender.
+        def steer_ld(sub, v, alpha):
+            out_ld, out_top = [], []
+            for _, cell in sorted(cells(sub).items()):
+                ids = m.encode([it["prompt"] for it in cell])
+                a, b = ids_for(m, cell, "correct", "contrast")
+                sign = torch.tensor([1.0 if it["speaker_gender"] == "F" else -1.0 for it in cell], device=m.device)
+                vec = torch.tensor(v, device=m.device, dtype=torch.float32)
+
+                def fn(old, sign=sign, vec=vec):
+                    new = old.clone()
+                    new[:, -1] += (alpha * natural * sign[:, None] * vec[None]).to(old.device, old.dtype)
+                    return new
+                lg = m.logits(ids, [(m.layers[L], "pre", patch_input(fn))])
+                out_ld += ld_from_logits(lg, a, b).tolist()
+                out_top += (lg.argmax(-1) == a).tolist()
+            return np.array(out_ld), np.array(out_top)
+
+        for name, v in dirs.items():
+            for alpha in alphas:
+                ldw, topw = steer_ld(wrong, v, alpha)
+                ldr, topr = steer_ld(right_sample, v, alpha)
+                rows.append(dict(layer=L, direction=name, alpha=alpha, repair_rate=float((ldw > 0).mean()),
+                                 repair_top1=float(topw.mean()), right_stay_right=float((ldr > 0).mean()),
+                                 right_top1=float(topr.mean())))
+            print(rows[-1], flush=True)
     df = pd.DataFrame(rows)
     df.to_csv(out / "steering.csv", index=False)
-    rnd = df[df.direction.str.startswith("random")].groupby("alpha").repair_rate.agg(["mean", "max"])
-    res["random_repair"] = rnd.to_dict()
-    res["repair"] = df[~df.direction.str.startswith("random")].to_dict(orient="records")
+    for L, d in df.groupby("layer"):
+        rnd = d[d.direction.str.startswith("random")].groupby("alpha").repair_rate.agg(["mean", "max"])
+        res[f"L{L}"]["random_repair"] = rnd.to_dict()
+        res[f"L{L}"]["repair"] = d[~d.direction.str.startswith("random")].to_dict(orient="records")
     save_json(res, out / "diagnose.json")
-    print(json.dumps({k: v for k, v in res.items() if k != "repair"}, indent=1))
+    print(json.dumps(res, indent=1)[:4000])
 
 
 # ================================================================== ambiguity
@@ -546,6 +559,147 @@ def step_ambig(m, items, out, work):
     df = pd.DataFrame(rows)
     df.to_csv(out / "ambiguity.csv", index=False)
     print(df.to_string())
+
+
+# ====================================================================== route
+def pron_pos(m, prompt):
+    """Index (with BOS) of the frame's first-person pronoun: the last मैं token of the prompt."""
+    toks = m.tok.convert_ids_to_tokens(m.tok(prompt).input_ids)
+    return max(i for i, t in enumerate(toks) if t.lstrip("▁") == "मैं")
+
+
+def step_route(m, items, out, work, max_per_cell=40, map_frames=("f01", "f05", "f08", "f10"),
+               lens_layers=(10, 15, 20, 25, 26, 30)):
+    """Follow-up to the residual patching maps, which show the cue moving name -> मैं -> answer.
+    (a) probes at the मैं position; (b) where the cue is lost for the noun-like names;
+    (c) attention to मैं and to the names; (d) components and heads that write the cue into मैं;
+    (e) zero / resample ablations of the late MLPs for the masculine default."""
+    beh = load_beh(out).set_index("id")
+    L, H = m.n_layers, m.n_heads
+    byid = {it["id"]: it for it in items}
+    cue = [it for it in items if it["group"] == "cue"]
+
+    # (a) residual stream at मैं, every layer, and probes trained on train names.
+    X, meta = [], []
+    for _, cell in sorted(cells(cue).items()):
+        p = pron_pos(m, cell[0]["prompt"])
+        c = m.run_with_cache(m.encode([it["prompt"] for it in cell]), want=("resid",))
+        X.append(torch.stack(c["resid"], 1)[:, :, p].float().cpu().numpy())
+        meta += cell
+    X = np.concatenate(X)
+    y = np.array([it["speaker_gender"] == "F" for it in meta], int)
+    split = np.array([it["split"] for it in meta])
+    tr, dv, te = split == "train", split == "dev", split == "test"
+    rows = []
+    for l in range(L + 1):
+        rows.append(dict(position="pronoun", layer=l, acc_dev=fit_probe(X[tr, l], y[tr], X[dv, l], y[dv])[1],
+                         acc_test=fit_probe(X[tr, l], y[tr], X[te, l], y[te])[1]))
+    pd.DataFrame(rows).to_csv(out / "probes_pronoun.csv", index=False)
+    print("pronoun probes:", [round(r["acc_test"], 3) for r in rows], flush=True)
+
+    # (b) Noun-like names: is the speaker's gender readable at the name, at मैं, at the answer?
+    acts = np.load(work / "acts_cue.npz")
+    row_of = {int(i): k for k, i in enumerate(acts["ids"])}
+    order = [row_of[it["id"]] for it in meta]              # align saved activations with `meta`
+    by_pos = {"name": acts["name"][order], "pronoun": X, "last": acts["last"][order]}
+    amb_pairs = {it["pair"] for it in meta if it["speaker"] in AMBIGUOUS}
+    train = np.array([it["split"] == "train" and it["pair"] not in amb_pairs for it in meta])
+    amb = np.array([it["speaker"] in AMBIGUOUS for it in meta])
+    fem = y == 1
+    t4 = np.array([it["template"] == "T4" for it in meta])
+    groups = {"T4_ambiguous": amb & t4, "other_ambiguous": amb & ~t4, "T4_other_female": fem & ~amb & ~train & t4}
+    rows = []
+    for pos, Xp in by_pos.items():
+        for l in [l for l in lens_layers if l <= L]:
+            clf = Probe(Xp[train, l], y[train])
+            pred = clf.predict(Xp[:, l])
+            for g, sel in groups.items():
+                rows.append(dict(position=pos, layer=l, names=g, n=int(sel.sum()),
+                                 probe_acc=float((pred[sel] == y[sel]).mean())))
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "route_ambiguity.csv", index=False)
+    print(df.pivot_table(index=["names", "position"], columns="layer", values="probe_acc").round(2).to_string())
+
+    # (c) Attention from the answer position and from मैं, per layer and head.
+    att = defaultdict(lambda: np.zeros((L, H)))
+    cnt = defaultdict(int)
+    for (tid, fid), cell in sorted(cells([it for it in items if it["group"] in ("cue", "distractor")]).items()):
+        ids = m.encode([it["prompt"] for it in cell])
+        c = m.run_with_cache(ids, want=(), attn_patterns=True)
+        p, s = pron_pos(m, cell[0]["prompt"]), cell[0]["name_pos"] + 1
+        d = cell[0]["distractor_pos"] + 1 if "distractor_pos" in cell[0] else None
+        grp = "cue" if tid.startswith("T") else tid
+        pat = torch.stack(c["pattern"], 0)                  # [L, b, H, q, k]
+        pairs_qk = [("last", -1, "pron", p), ("last", -1, "speaker", s), ("pron", p, "speaker", s)]
+        if d is not None:
+            pairs_qk += [("last", -1, "distractor", d), ("pron", p, "distractor", d)]
+        for qn, qi, kn, ki in pairs_qk:
+            att[f"{grp}:{qn}->{kn}"] += pat[:, :, :, qi, ki].sum(1).cpu().numpy()
+        cnt[grp] += len(cell)
+    att_mean = {k: (v / cnt[k.split(":")[0]]).tolist() for k, v in att.items()}
+    save_json(att_mean, out / "route_attention.json")
+
+    # (d) Patching at the मैं position: attention / MLP output per layer and single heads.
+    eff_rows = []
+    for group in ("cue", "distractor"):
+        pairs = [it for it in patch_pairs(beh.reset_index(), items, group) if it["frame"] in map_frames]
+        tot = defaultdict(float)
+        for (tid, fid), cell in sorted(cells(pairs).items()):
+            cell = cell[:max_per_cell]
+            clean_ids = m.encode([it["prompt"] for it in cell])
+            corr_ids = m.encode([it["corrupt_prompt"] for it in cell])
+            a, b = ids_for(m, cell, "correct", "contrast")
+            p = pron_pos(m, cell[0]["prompt"])
+            cc = m.run_with_cache(clean_ids)
+            tot["clean"] += ld_from_logits(cc["logits"], a, b).sum().item()
+            tot["corrupt"] += ld_from_logits(m.logits(corr_ids), a, b).sum().item()
+
+            def run(hooks):
+                return ld_from_logits(m.logits(corr_ids, hooks), a, b).sum().item()
+            for l in range(L):
+                tot[f"attn_{l}"] += run([(m.layers[l].post_attention_layernorm, "fwd",
+                                          patch_output(set_positions(cc["attn"][l], [p])))])
+                tot[f"mlp_{l}"] += run([(m.layers[l].post_feedforward_layernorm, "fwd",
+                                         patch_output(set_positions(cc["mlp"][l], [p])))])
+                tot[f"resid_{l}"] += run([(m.layers[l], "pre", patch_input(set_positions(cc["resid"][l], [p])))])
+                for h in range(H):
+                    sl = slice(h * m.head_dim, (h + 1) * m.head_dim)
+
+                    def fn(old, zsrc=cc["z"][l][:, p, h], sl=sl):
+                        new = old.clone()
+                        new[:, p, sl] = zsrc.to(old.device, old.dtype)
+                        return new
+                    tot[f"head_{l}_{h}"] += run([(m.layers[l].self_attn.o_proj, "pre", patch_input(fn))])
+            print(f"route patch {group} {tid} {fid}", flush=True)
+        norm = lambda v: (v - tot["corrupt"]) / (tot["clean"] - tot["corrupt"])
+        for l in range(L):
+            for kind in ("attn", "mlp", "resid"):
+                eff_rows.append(dict(group=group, kind=kind, layer=l, head=-1, effect=norm(tot[f"{kind}_{l}"])))
+            for h in range(H):
+                eff_rows.append(dict(group=group, kind="head", layer=l, head=h, effect=norm(tot[f"head_{l}_{h}"])))
+    pe = pd.DataFrame(eff_rows)
+    pe.to_csv(out / "route_patching.csv", index=False)
+    top = pe[(pe.kind == "head") & (pe.group == "cue")].nlargest(8, "effect")
+    print("heads writing into मैं:\n", top.to_string(), flush=True)
+
+    # (e) Masculine default on no-cue prompts: zero-ablate late MLPs at the answer position.
+    sets = {"32": [32], "26,29,30": [26, 29, 30], "26,29,30,32": [26, 29, 30, 32],
+            "control 19-22": [19, 20, 21, 22]}
+    neutral = [it for it in items if it["group"] == "neutral"]
+    res = {}
+    sets = {k: v for k, v in sets.items() if max(v) < L}
+    for name, mlps in [("none", [])] + list(sets.items()):
+        lds = []
+        for _, cell in sorted(cells(neutral).items()):
+            ids = m.encode([it["prompt"] for it in cell])
+            f_ids, m_ids = ids_for(m, cell, "fem", "masc")
+            hooks = [(m.layers[l].post_feedforward_layernorm, "fwd",
+                      patch_output(lambda old: torch.cat([old[:, :-1], torch.zeros_like(old[:, -1:])], 1)))
+                     for l in mlps]
+            lds += ld_from_logits(m.logits(ids, hooks), f_ids, m_ids).tolist()
+        res[name] = dict(ld_fem=float(np.mean(lds)), share_masc=float(np.mean(np.array(lds) < 0)))
+        print("zero-ablate", name, res[name], flush=True)
+    save_json(res, out / "route_default_ablation.json")
 
 
 # ====================================================================== heads
@@ -631,7 +785,8 @@ def mlp_default_ablation(m, items, out, k=4):
 
 # ======================================================================= main
 STEPS = dict(sanity=step_sanity, behaviour=step_behaviour, lens=step_lens, patching=step_patching,
-             probes=step_probes, diagnose=step_diagnose, heads=step_heads, ambig=step_ambig)
+             probes=step_probes, diagnose=step_diagnose, heads=step_heads, ambig=step_ambig,
+             route=step_route)
 
 
 def main():
@@ -664,7 +819,7 @@ def main():
         t = time.time()
         fn = STEPS[s]
         try:  # keep going so one broken step does not cost the GPU time of the others
-            if s in ("probes", "diagnose", "ambig"):
+            if s in ("probes", "diagnose", "ambig", "route"):
                 fn(m, items, out, work)
             else:
                 fn(m, items, out)
