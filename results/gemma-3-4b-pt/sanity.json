@@ -1,0 +1,16 @@
+{
+  "resid_identity_max_rel_err": 0.0052076904103159904,
+  "final_readout_max_abs_err": 0.07651901245117188,
+  "dla_sum_max_abs_err": 0.0897526741027832,
+  "head_sum_vs_attn_max_abs_err": 0.0004587210714817047,
+  "ld_values": [
+    0.1875,
+    2.9375,
+    2.0,
+    3.0625,
+    2.125,
+    3.0625,
+    0.25,
+    2.9375
+  ]
+}

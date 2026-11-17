@@ -12,10 +12,12 @@ Steps (run in this order; later steps read earlier outputs):
     diagnose    cue readability on wrong items + steering repair           (RQ4, H1)
     heads       candidate speaker heads: attention, distractor test,
                 and late-MLP ablation for the masculine default            (H3, H4)
+    ambig       probe readability on female names that are also nouns      (H1)
 """
 import argparse
 import json
 import time
+import traceback
 from collections import defaultdict
 from pathlib import Path
 
@@ -340,20 +342,50 @@ def collect_acts(m, items, positions=("last", "name")):
         R = torch.stack(c["resid"], 1)  # [b, L+1, S, d]
         for k, it in enumerate(cell):
             if "last" in positions:
-                X["last"].append(R[k, :, -1].float().cpu().numpy().astype(np.float16))
+                X["last"].append(R[k, :, -1].float().cpu().numpy())
             if "name" in positions:
-                X["name"].append(R[k, :, it["name_pos"] + 1].float().cpu().numpy().astype(np.float16))
+                X["name"].append(R[k, :, it["name_pos"] + 1].float().cpu().numpy())
             meta.append(it)
     return {p: np.stack(v) for p, v in X.items()}, meta
 
 
+class Probe:
+    """Standardised L2 logistic regression (sklearn's objective with C), fit full-batch on GPU."""
+
+    def __init__(self, X, y, C=0.1, device=None):
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        X = torch.as_tensor(np.asarray(X, np.float32), device=device)
+        y = torch.as_tensor(np.asarray(y, np.float32), device=device)
+        self.mu, self.sd = X.mean(0), X.std(0, unbiased=False).clamp_min(1e-6)
+        Xs = (X - self.mu) / self.sd
+        w = torch.zeros(X.shape[1] + 1, device=device, requires_grad=True)
+        opt = torch.optim.LBFGS([w], max_iter=500, line_search_fn="strong_wolfe", tolerance_grad=1e-7)
+
+        def closure():
+            opt.zero_grad()
+            z = Xs @ w[:-1] + w[-1]
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(z, y, reduction="sum") \
+                + 0.5 / C * (w[:-1] ** 2).sum()
+            loss.backward()
+            return loss
+        opt.step(closure)
+        self.w = w.detach()
+
+    def predict(self, X):
+        X = torch.as_tensor(np.asarray(X, np.float32), device=self.w.device)
+        return (((X - self.mu) / self.sd) @ self.w[:-1] + self.w[-1] > 0).int().cpu().numpy()
+
+    def score(self, X, y):
+        return float((self.predict(X) == np.asarray(y)).mean())
+
+    def direction(self):
+        """Probe normal in raw activation space."""
+        return (self.w[:-1] / self.sd).cpu().numpy()
+
+
 def fit_probe(Xtr, ytr, Xte, yte, C=0.1):
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-    clf = make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=2000))
-    clf.fit(Xtr.astype(np.float32), ytr)
-    return clf, clf.score(Xte.astype(np.float32), yte)
+    clf = Probe(Xtr, ytr, C)
+    return clf, clf.score(Xte, yte)
 
 
 def step_probes(m, items, out, work):
@@ -406,8 +438,7 @@ def step_diagnose(m, items, out, work, n_random=20, alphas=(0.5, 1, 2, 4, 8)):
     dom = mu_f - mu_m
     natural = float(np.linalg.norm(dom))                 # class-mean separation along the direction
     v_dom = dom / np.linalg.norm(dom)
-    lr = clf[-1]
-    v_probe = (lr.coef_[0] / clf[0].scale_)              # back to raw activation space
+    v_probe = clf.direction()                            # back to raw activation space
     v_probe = v_probe / np.linalg.norm(v_probe)
 
     # Wrong items: cue items and distractor items the model gets wrong on the clean prompt.
@@ -472,6 +503,49 @@ def step_diagnose(m, items, out, work, n_random=20, alphas=(0.5, 1, 2, 4, 8)):
     res["repair"] = df[~df.direction.str.startswith("random")].to_dict(orient="records")
     save_json(res, out / "diagnose.json")
     print(json.dumps({k: v for k, v in res.items() if k != "repair"}, indent=1))
+
+
+# ================================================================== ambiguity
+# Female names that are also common nouns (poem, line, border, worship). Found in the error
+# analysis after the behaviour step, not chosen in advance.
+AMBIGUOUS = ("कविता", "रेखा", "सीमा", "पूजा")
+
+
+def step_ambig(m, items, out, work):
+    """Is the speaker's gender linearly readable on the noun-like names, per template?
+    Probes are trained on train-split pairs that do not contain an ambiguous name."""
+    acts = np.load(work / "acts_cue.npz")
+    beh = load_beh(out).set_index("id")
+    # Same layer at both positions: the best name-position layer on dev is the embedding, which
+    # cannot depend on the context the name appears in.
+    L_star = json.loads((out / "probe_layer.json").read_text())["best_layer_last"]
+    byid = {it["id"]: it for it in items}
+    meta = [byid[int(i)] for i in acts["ids"]]
+    y = np.array([it["speaker_gender"] == "F" for it in meta], int)
+    amb_pairs = {it["pair"] for it in meta if it["speaker"] in AMBIGUOUS}
+    train = np.array([it["split"] == "train" and it["pair"] not in amb_pairs for it in meta])
+    fem = np.array([it["speaker_gender"] == "F" for it in meta])
+    amb = np.array([it["speaker"] in AMBIGUOUS for it in meta])
+    tmpl = np.array([it["template"] for it in meta])
+    model_ok = np.array([bool(beh.loc[it["id"], "correct"]) for it in meta])
+    rows = []
+    for pos, L in (("last", L_star), ("name", L_star)):
+        X = acts[pos][:, L]
+        clf = Probe(X[train], y[train])
+        pred = clf.predict(X)
+        for t in sorted(set(tmpl)):
+            for grp, mask in (("ambiguous", fem & amb), ("other_female", fem & ~amb & ~train),
+                              ("male", ~fem & ~train)):
+                sel = mask & (tmpl == t)
+                if sel.any():
+                    rows.append(dict(position=pos, layer=L, template=t, names=grp, n=int(sel.sum()),
+                                     model_acc=float(model_ok[sel].mean()),
+                                     probe_acc=float((pred[sel] == y[sel]).mean()),
+                                     probe_acc_model_wrong=float((pred[sel & ~model_ok] == y[sel & ~model_ok]).mean())
+                                     if (sel & ~model_ok).any() else None))
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "ambiguity.csv", index=False)
+    print(df.to_string())
 
 
 # ====================================================================== heads
@@ -557,7 +631,7 @@ def mlp_default_ablation(m, items, out, k=4):
 
 # ======================================================================= main
 STEPS = dict(sanity=step_sanity, behaviour=step_behaviour, lens=step_lens, patching=step_patching,
-             probes=step_probes, diagnose=step_diagnose, heads=step_heads)
+             probes=step_probes, diagnose=step_diagnose, heads=step_heads, ambig=step_ambig)
 
 
 def main():
@@ -585,14 +659,22 @@ def main():
         items = keep
     m = Model(args.model, dtype=getattr(torch, args.dtype), multi_gpu=args.multi_gpu)
     print(f"loaded {args.model}: L={m.n_layers} H={m.n_heads} d={m.d_model} on {m.device}", flush=True)
+    failed = []
     for s in args.steps:
         t = time.time()
         fn = STEPS[s]
-        if s in ("probes", "diagnose"):
-            fn(m, items, out, work)
-        else:
-            fn(m, items, out)
-        print(f"== {s} done in {time.time() - t:.0f}s", flush=True)
+        try:  # keep going so one broken step does not cost the GPU time of the others
+            if s in ("probes", "diagnose", "ambig"):
+                fn(m, items, out, work)
+            else:
+                fn(m, items, out)
+            print(f"== {s} done in {time.time() - t:.0f}s", flush=True)
+        except Exception:
+            traceback.print_exc()
+            failed.append(s)
+            print(f"== {s} FAILED after {time.time() - t:.0f}s", flush=True)
+    if failed:
+        raise SystemExit(f"failed steps: {failed}")
 
 
 if __name__ == "__main__":
