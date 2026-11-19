@@ -884,10 +884,15 @@ def step_honor_route(m, items, out, max_per_cell=40):
     print(pe[pe.kind != "head"].nlargest(8, "effect").to_string(), flush=True)
 
 
+def step_sae(m, items, out, work):
+    from .sae import run_sae  # imported lazily: sae.py imports helpers from this module
+    run_sae(m, items, out, work)
+
+
 # ======================================================================= main
 STEPS = dict(sanity=step_sanity, behaviour=step_behaviour, lens=step_lens, patching=step_patching,
              probes=step_probes, diagnose=step_diagnose, heads=step_heads, ambig=step_ambig,
-             route=step_route, honor=step_honor, honor_route=step_honor_route)
+             route=step_route, honor=step_honor, honor_route=step_honor_route, sae=step_sae)
 
 
 def main():
@@ -920,7 +925,7 @@ def main():
         t = time.time()
         fn = STEPS[s]
         try:  # keep going so one broken step does not cost the GPU time of the others
-            if s in ("probes", "diagnose", "ambig", "route"):
+            if s in ("probes", "diagnose", "ambig", "route", "sae"):
                 fn(m, items, out, work)
             else:
                 fn(m, items, out)
