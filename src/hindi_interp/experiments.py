@@ -178,6 +178,8 @@ def summarise_behaviour(df, out):
     s = {}
     cue, dis, neu = (df[df.group == g] for g in ("cue", "distractor", "neutral"))
     for name, d in (("cue", cue), ("distractor", dis)):
+        if d.empty:  # the honorific and kinship data have no distractor items
+            continue
         d = d.assign(acc=d.correct.astype(float), top1=d.top1_correct.astype(float),
                      genc=d.gen_correct.astype(float), genv=d.gen_has_verb.astype(float))
         s[name] = {k: cluster_boot(d, k) for k in ("acc", "top1", "genc", "genv", "ld")}
