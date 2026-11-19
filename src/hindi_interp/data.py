@@ -47,6 +47,13 @@ FRAMES = {
     "f12": ("मैं कल रात देर से घर", AYA),
 }
 
+# Natural ending after the gendered verb (feminine, masculine), from the native-speaker check.
+# Prompts stop before the verb, so these are only shown in the review file.
+PAST = ("थी", "था")
+PRES = ("हूँ", "हूँ")
+FRAME_TAIL = {"f01": PAST, "f02": PAST, "f03": PAST, "f04": PAST, "f05": ("", ""), "f06": ("", ""),
+              "f07": ("", ""), "f08": PRES, "f09": PRES, "f10": PRES, "f11": PRES, "f12": PAST}
+
 # Context templates. {N} = speaker name, {F} = frame. The name is never sentence-initial,
 # so it always gets the single-token "▁name" form.
 CUE_TEMPLATES = {
@@ -149,11 +156,14 @@ def check_tokenization(items, tokenize):
 def write_review(items, path):
     rng = random.Random(0)
     lines = ["# Speaker-gender data: please check\n",
-             "Mark anything unnatural, ambiguous or wrong. The model must predict the word in [brackets].\n",
+             "Mark anything unnatural, ambiguous or wrong. The model must predict the word in [brackets] (bold in the "
+             "samples); the prompt stops before it, so the ending after it (थी/था, हूँ) is not part of the prompt.\n",
              "## Names (female | male, paired by row)\n"]
     lines += [f"{i+1}. {f} | {m}  ({SPLIT_OF_PAIR[i]})" for i, (f, m) in enumerate(zip(FEMALE, MALE))]
     lines.append("\n## Sentence frames (feminine / masculine continuation)\n")
-    lines += [f"- {fid}: {fr} … [{v[0]} / {v[1]}]" for fid, (fr, v) in FRAMES.items()]
+    for fid, (fr, v) in FRAMES.items():
+        t = FRAME_TAIL[fid]
+        lines.append(f"- {fid}: {fr} … [{v[0]} / {v[1]}]" + (f" {t[0]}/{t[1]}" if t[0] != t[1] else f" {t[0]}" if t[0] else ""))
     lines.append("\n## Context templates\n")
     for d in (CUE_TEMPLATES, NEUTRAL_TEMPLATES, DISTRACTOR_TEMPLATES):
         lines += [f"- {tid} ({ct}): `{t}`" for tid, (ct, t) in d.items()]
@@ -161,8 +171,13 @@ def write_review(items, path):
     for grp, k in (("cue", 20), ("distractor", 8), ("neutral", 4)):
         pool = [it for it in items if it["group"] == grp]
         for it in rng.sample(pool, k):
-            ans = it["correct"] or f"{it['fem']}/{it['masc']} (no cue)"
-            lines.append(f"- [{it['template']}] {it['prompt']} → **{ans}**")
+            fem_tail, masc_tail = FRAME_TAIL[it["frame"]]
+            if it["correct"]:
+                tail = fem_tail if it["correct"] == it["fem"] else masc_tail
+                ans = f"**{it['correct']}** {tail}".rstrip()
+            else:
+                ans = f"**{it['fem']} {fem_tail}/{it['masc']} {masc_tail}** (no cue)".replace(" /", "/").replace(" **", "**")
+            lines.append(f"- [{it['template']}] {it['prompt']} → {ans}")
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

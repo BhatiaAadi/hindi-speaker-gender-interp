@@ -1,7 +1,7 @@
 # Where Does the Model Look? Speaker Gender in Hindi First-Person Verbs
 
 Mechanistic-interpretability mini-project (IIIT Hyderabad). Hindi first-person verbs mark the
-speaker's gender (`मैं कल बाज़ार गई` / `गया`); English (`I went`) does not. We ask where
+speaker's gender (`मैं कल बाज़ार गई थी` / `गया था`); English (`I went`) does not. We ask where
 Gemma-3-4B (pretrained) reads the speaker's gender from the context, which components carry it to
 the verb, and why it fails when it fails.
 
