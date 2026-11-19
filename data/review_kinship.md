@@ -10,14 +10,14 @@ Mark anything unnatural, ambiguous or wrong. The model must predict the term in 
 
 ## Relations (maternal term / paternal term)
 
-- k01: माँ के छोटे भाई → [मामा]  |  पिता के छोटे भाई → [चाचा]  (younger brother, train)
+- k01: माँ के भाई → [मामा]  |  पिता के छोटे भाई → [चाचा]  (younger brother, train)
 - k02: माँ के पिता → [नाना]  |  पिता के पिता → [दादा]  (father, train)
 - k03: माँ की माँ → [नानी]  |  पिता की माँ → [दादी]  (mother, dev)
 - k04: माँ की बहन → [मौसी]  |  पिता की बहन → [बुआ]  (sister, train)
 - k05: माँ की बहन के पति → [मौसा]  |  पिता की बहन के पति → [फूफा]  (sister's husband, test)
-- k06: माँ के छोटे भाई की पत्नी → [मामी]  |  पिता के छोटे भाई की पत्नी → [चाची]  (younger brother's wife, test)
+- k06: माँ के भाई की पत्नी → [मामी]  |  पिता के छोटे भाई की पत्नी → [चाची]  (younger brother's wife, test)
 
-Questions: are these the terms you use? (e.g. पिता के बड़े भाई = ताऊ / बड़े पापा, so we say छोटे भाई for चाचा.) Is k05/k06 (two-step) natural?
+Questions: are these the terms you use? (e.g. पिता के बड़े भाई = ताऊ / बड़े पापा, so we say छोटे भाई for चाचा.) Is k05/k06 (two-step) natural? yes, though either big or small the mother's bro becomes "mama"
 
 ## Context templates
 

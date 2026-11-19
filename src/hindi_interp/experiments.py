@@ -246,7 +246,14 @@ def patch_pairs(beh, items, group="cue"):
     return [it for it in items if it["id"] in ok]
 
 
+def data_frames(items, map_frames):
+    """map_frames if the data has them (speaker gender), else its first four frames."""
+    frames = sorted({it["frame"] for it in items if it["group"] == "cue"})
+    return map_frames if set(map_frames) <= set(frames) else tuple(frames[:4])
+
+
 def step_patching(m, items, out, max_per_cell=40, map_frames=("f01", "f05", "f08", "f10")):
+    map_frames = data_frames(items, map_frames)
     beh = load_beh(out)
     pairs = patch_pairs(beh, items, "cue")
     L, H = m.n_layers, m.n_heads
@@ -570,6 +577,52 @@ def pron_pos(m, prompt):
     return max(i for i, t in enumerate(toks) if t.lstrip("▁") == "मैं")
 
 
+def patch_at_position(m, pairs, pos_fn, max_per_cell):
+    """Summed LD when one component's output at one position (pos_fn(prompt)) is restored from
+    the clean run in the corrupt run: attention / MLP / residual per layer, and single heads."""
+    L, H = m.n_layers, m.n_heads
+    tot = defaultdict(float)
+    for (tid, fid), cell in sorted(cells(pairs).items()):
+        cell = cell[:max_per_cell]
+        clean_ids = m.encode([it["prompt"] for it in cell])
+        corr_ids = m.encode([it["corrupt_prompt"] for it in cell])
+        a, b = ids_for(m, cell, "correct", "contrast")
+        p = pos_fn(cell[0]["prompt"])
+        cc = m.run_with_cache(clean_ids)
+        tot["clean"] += ld_from_logits(cc["logits"], a, b).sum().item()
+        tot["corrupt"] += ld_from_logits(m.logits(corr_ids), a, b).sum().item()
+
+        def run(hooks):
+            return ld_from_logits(m.logits(corr_ids, hooks), a, b).sum().item()
+        for l in range(L):
+            tot[f"attn_{l}"] += run([(m.layers[l].post_attention_layernorm, "fwd",
+                                      patch_output(set_positions(cc["attn"][l], [p])))])
+            tot[f"mlp_{l}"] += run([(m.layers[l].post_feedforward_layernorm, "fwd",
+                                     patch_output(set_positions(cc["mlp"][l], [p])))])
+            tot[f"resid_{l}"] += run([(m.layers[l], "pre", patch_input(set_positions(cc["resid"][l], [p])))])
+            for h in range(H):
+                sl = slice(h * m.head_dim, (h + 1) * m.head_dim)
+
+                def fn(old, zsrc=cc["z"][l][:, p, h], sl=sl):
+                    new = old.clone()
+                    new[:, p, sl] = zsrc.to(old.device, old.dtype)
+                    return new
+                tot[f"head_{l}_{h}"] += run([(m.layers[l].self_attn.o_proj, "pre", patch_input(fn))])
+        print(f"patch at position: {tid} {fid}", flush=True)
+    return tot
+
+
+def effect_rows(tot, group, L, H):
+    norm = lambda v: (v - tot["corrupt"]) / (tot["clean"] - tot["corrupt"])
+    rows = []
+    for l in range(L):
+        for kind in ("attn", "mlp", "resid"):
+            rows.append(dict(group=group, kind=kind, layer=l, head=-1, effect=norm(tot[f"{kind}_{l}"])))
+        for h in range(H):
+            rows.append(dict(group=group, kind="head", layer=l, head=h, effect=norm(tot[f"head_{l}_{h}"])))
+    return rows
+
+
 def step_route(m, items, out, work, max_per_cell=40, map_frames=("f01", "f05", "f08", "f10"),
                lens_layers=(10, 15, 20, 25, 26, 30)):
     """Follow-up to the residual patching maps, which show the cue moving name -> मैं -> answer.
@@ -645,40 +698,8 @@ def step_route(m, items, out, work, max_per_cell=40, map_frames=("f01", "f05", "
     eff_rows = []
     for group in ("cue", "distractor"):
         pairs = [it for it in patch_pairs(beh.reset_index(), items, group) if it["frame"] in map_frames]
-        tot = defaultdict(float)
-        for (tid, fid), cell in sorted(cells(pairs).items()):
-            cell = cell[:max_per_cell]
-            clean_ids = m.encode([it["prompt"] for it in cell])
-            corr_ids = m.encode([it["corrupt_prompt"] for it in cell])
-            a, b = ids_for(m, cell, "correct", "contrast")
-            p = pron_pos(m, cell[0]["prompt"])
-            cc = m.run_with_cache(clean_ids)
-            tot["clean"] += ld_from_logits(cc["logits"], a, b).sum().item()
-            tot["corrupt"] += ld_from_logits(m.logits(corr_ids), a, b).sum().item()
-
-            def run(hooks):
-                return ld_from_logits(m.logits(corr_ids, hooks), a, b).sum().item()
-            for l in range(L):
-                tot[f"attn_{l}"] += run([(m.layers[l].post_attention_layernorm, "fwd",
-                                          patch_output(set_positions(cc["attn"][l], [p])))])
-                tot[f"mlp_{l}"] += run([(m.layers[l].post_feedforward_layernorm, "fwd",
-                                         patch_output(set_positions(cc["mlp"][l], [p])))])
-                tot[f"resid_{l}"] += run([(m.layers[l], "pre", patch_input(set_positions(cc["resid"][l], [p])))])
-                for h in range(H):
-                    sl = slice(h * m.head_dim, (h + 1) * m.head_dim)
-
-                    def fn(old, zsrc=cc["z"][l][:, p, h], sl=sl):
-                        new = old.clone()
-                        new[:, p, sl] = zsrc.to(old.device, old.dtype)
-                        return new
-                    tot[f"head_{l}_{h}"] += run([(m.layers[l].self_attn.o_proj, "pre", patch_input(fn))])
-            print(f"route patch {group} {tid} {fid}", flush=True)
-        norm = lambda v: (v - tot["corrupt"]) / (tot["clean"] - tot["corrupt"])
-        for l in range(L):
-            for kind in ("attn", "mlp", "resid"):
-                eff_rows.append(dict(group=group, kind=kind, layer=l, head=-1, effect=norm(tot[f"{kind}_{l}"])))
-            for h in range(H):
-                eff_rows.append(dict(group=group, kind="head", layer=l, head=h, effect=norm(tot[f"head_{l}_{h}"])))
+        tot = patch_at_position(m, pairs, lambda prompt: pron_pos(m, prompt), max_per_cell)
+        eff_rows += effect_rows(tot, group, L, H)
     pe = pd.DataFrame(eff_rows)
     pe.to_csv(out / "route_patching.csv", index=False)
     top = pe[(pe.kind == "head") & (pe.group == "cue")].nlargest(8, "effect")
@@ -740,14 +761,18 @@ def step_heads(m, items, out, top_k=6):
         d = df[df.group == "distractor"]
         s[key] = dict(
             att_speaker_cue=float(df[df.group == "cue"][f"{key}_att_speaker"].mean()),
-            dla_cue=float(df[df.group == "cue"][f"{key}_dla"].mean()),
+            dla_cue=float(df[df.group == "cue"][f"{key}_dla"].mean()))
+        if d.empty:  # honorific and kinship data: see step_honor for the two-person comparison
+            continue
+        s[key].update(
             att_speaker_D1=float(d[d.template == "D1"][f"{key}_att_speaker"].mean()),
             att_distractor_D1=float(d[d.template == "D1"][f"{key}_att_distractor"].mean()),
             att_speaker_D2=float(d[d.template == "D2"][f"{key}_att_speaker"].mean()),
             att_distractor_D2=float(d[d.template == "D2"][f"{key}_att_distractor"].mean()),
             share_more_on_speaker_D1=float((d[d.template == "D1"][f"{key}_att_speaker"] >
                                             d[d.template == "D1"][f"{key}_att_distractor"]).mean()))
-    s["mlp_default_ablation"] = mlp_default_ablation(m, items, out)
+    if any(it["template"] == "T1" for it in items):
+        s["mlp_default_ablation"] = mlp_default_ablation(m, items, out)
     save_json(s, out / "heads_summary.json")
     print(json.dumps(s, indent=1))
 
@@ -785,10 +810,84 @@ def mlp_default_ablation(m, items, out, k=4):
     return res
 
 
+# ================================================================= honorific
+def zero_last_mlps(m, items, mlps):
+    """LD (fem - masc) on items with the listed MLPs' outputs zeroed at the answer position."""
+    lds = []
+    for _, cell in sorted(cells(items).items()):
+        ids = m.encode([it["prompt"] for it in cell])
+        f_ids, m_ids = ids_for(m, cell, "fem", "masc")
+        hooks = [(m.layers[l].post_feedforward_layernorm, "fwd",
+                  patch_output(lambda old: torch.cat([old[:, :-1], torch.zeros_like(old[:, -1:])], 1)))
+                 for l in mlps]
+        lds += ld_from_logits(m.logits(ids, hooks), f_ids, m_ids).tolist()
+    return np.array(lds)
+
+
+def step_honor(m, items, out, gender_heads=((14, 1), (14, 3), (25, 6)), top_k=6):
+    """Honorific data only. (a) Attention from the answer position to the addressee (marked by
+    से) vs. the speaker (marked by ने), for the top patching heads and the speaker-gender heads,
+    with the addressee nearer (R1, R2) or farther (R3). (b) Formal default on no-addressee
+    prompts: zero-ablate the late MLPs that push hardest towards आप, against a control set."""
+    eff = np.array(json.loads((out / "patching_summary.json").read_text())["ALL"]["head_den"])
+    flat = sorted(((eff[l, h], l, h) for l in range(m.n_layers) for h in range(m.n_heads)), reverse=True)
+    heads = list(dict.fromkeys([(int(l), int(h)) for _, l, h in flat[:top_k]] + list(gender_heads)))
+    rows = []
+    for (tid, fid), cell in sorted(cells([it for it in items if it["group"] == "cue"]).items()):
+        c = m.run_with_cache(m.encode([it["prompt"] for it in cell]), want=("resid",), attn_patterns=True)
+        for k, it in enumerate(cell):
+            a_pos = it["name_pos"] + 1                                      # +1 for BOS
+            toks = m.tok.tokenize(it["prompt"])
+            pos = dict(addressee=a_pos, se=a_pos + 1, speaker=toks.index("▁" + it["speaker_name"]) + 1,
+                       quote=toks.index('▁"') + 1)
+            row = dict(id=it["id"], template=tid, frame=fid, formal=it["speaker_gender"] == "F")
+            for l, h in heads:
+                pat = c["pattern"][l][k, h, -1]
+                for w, p in pos.items():
+                    row[f"L{l}H{h}_att_{w}"] = pat[p].item()
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "honor_heads.csv", index=False)
+    s = dict(heads={})
+    for l, h in heads:
+        key = f"L{l}H{h}"
+        s["heads"][key] = dict(patch_effect=float(eff[l, h]), **{
+            f"{t}_{w}": float(df[df.template == t][f"{key}_att_{w}"].mean())
+            for t in sorted(df.template.unique()) for w in ("addressee", "se", "speaker", "quote")})
+        s["heads"][key]["share_more_on_addressee"] = float(
+            (df[f"{key}_att_addressee"] > df[f"{key}_att_speaker"]).mean())
+    comp = pd.read_csv(out / "dla_components.csv")
+    neu_dla = comp[comp.group == "neutral"]
+    late = range(m.n_layers // 2, m.n_layers)
+    push = sorted(late, key=lambda l: -neu_dla[f"mlp{l}"].mean())[:4]  # most towards आप
+    control = [l for l in range(m.n_layers // 2 - 4, m.n_layers) if l not in push][:4]
+    neutral = [it for it in items if it["group"] == "neutral"]
+    s["default"] = dict(formal_mlps=push, formal_mlp_dla=[float(neu_dla[f"mlp{l}"].mean()) for l in push],
+                        control_mlps=control)
+    for name, mlps in (("none", []), ("top1", push[:1]), ("top4", push), ("control", control)):
+        lds = zero_last_mlps(m, neutral, mlps)
+        s["default"][name] = dict(ld_formal=float(lds.mean()), share_formal=float((lds > 0).mean()))
+    save_json(s, out / "honor_summary.json")
+    print(json.dumps(s, indent=1), flush=True)
+
+
+def step_honor_route(m, items, out, max_per_cell=40):
+    """Honorific data only: which components write the cue onto the opening quote mark, where
+    the residual maps show it between layers 16 and 25 (the analogue of मैं for speaker gender)."""
+    beh = load_beh(out)
+    map_frames = data_frames(items, ("f01", "f05", "f08", "f10"))
+    pairs = [it for it in patch_pairs(beh, items, "cue") if it["frame"] in map_frames]
+    quote = lambda prompt: m.tok.convert_ids_to_tokens(m.tok(prompt).input_ids).index('▁"')
+    pe = pd.DataFrame(effect_rows(patch_at_position(m, pairs, quote, max_per_cell), "cue", m.n_layers, m.n_heads))
+    pe.to_csv(out / "route_patching.csv", index=False)
+    print("heads writing into the quote mark:\n", pe[pe.kind == "head"].nlargest(8, "effect").to_string(), flush=True)
+    print(pe[pe.kind != "head"].nlargest(8, "effect").to_string(), flush=True)
+
+
 # ======================================================================= main
 STEPS = dict(sanity=step_sanity, behaviour=step_behaviour, lens=step_lens, patching=step_patching,
              probes=step_probes, diagnose=step_diagnose, heads=step_heads, ambig=step_ambig,
-             route=step_route)
+             route=step_route, honor=step_honor, honor_route=step_honor_route)
 
 
 def main():
