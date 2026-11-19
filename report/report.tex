@@ -84,6 +84,16 @@ Our code and data are public.\footnote{\url{https://github.com/BhatiaAadi/hindi-
 \end{figure}
 
 % =====================================================================
+\section{Related work}
+\label{sec:related}
+
+\paragraph{Hindi in LLMs.} Behavioural benchmarks find first-person gender agreement gaps in French, Arabic and Hindi~\cite{morphogen2026}, a male bias in Hindi and Bengali honorifics~\cite{honorific2025}, and a paternal advantage in producing Hindi kinship terms~\cite{pardasani2026}. All three measure behaviour only; we ask what happens inside the model on the same phenomena.
+
+\paragraph{Agreement and referents.} Subject--verb agreement circuits for person and number have been compared across languages~\cite{ferrando2024,gidi2026}, and Hindi--Urdu agreement has been modelled as a search process~\cite{zhou2024}. Our tasks instead need the right referent, as in indirect-object identification~\cite{wang2022}, and \citet{vig2020} located gender bias with causal mediation. Late MLPs that promote output tokens~\cite{geva2022} are natural candidates for writing defaults.
+
+\paragraph{Methods.} We use activation patching~\cite{meng2022,zhang2024,heimersheim2024}, the logit lens~\cite{nostalgebraist2020}, direct logit attribution (DLA)~\cite{elhage2021}, probes with control tasks~\cite{hewitt2019,belinkov2022}, steering~\cite{turner2023} and sparse autoencoders~\cite{cunningham2024,rajamanoharan2024,gemmascope2}. Lens readings of multilingual models are contested~\cite{wendler2024,bayazit2026,panchal2026}, which is why every claim here rests on an intervention.
+
+% =====================================================================
 \section{Data}
 \label{sec:data}
 
@@ -280,15 +290,6 @@ The SAEs keep enough of the computation to study: reconstructing a site with its
 \paragraph{Scope.} Compared with the proposal, we dropped the Sarvam-1 comparison and the test of H2, and treat kinship at the level of behaviour.
 
 % =====================================================================
-\section{Related work}
-
-\paragraph{Hindi in LLMs.} Behavioural benchmarks find first-person gender agreement gaps in French, Arabic and Hindi~\cite{morphogen2026}, a male bias in Hindi and Bengali honorifics~\cite{honorific2025}, and a paternal advantage in producing Hindi kinship terms~\cite{pardasani2026}. Our work asks what happens inside the model on the same three phenomena.
-
-\paragraph{Agreement and referents.} Subject--verb agreement circuits for person and number have been compared across languages~\cite{ferrando2024,gidi2026}, and Hindi--Urdu agreement has been modelled as a search process~\cite{zhou2024}. Our tasks instead need the right referent, as in indirect-object identification~\cite{wang2022}, and \citet{vig2020} located gender bias with causal mediation. Late MLPs that promote output tokens~\cite{geva2022} are natural candidates for writing defaults.
-
-\paragraph{Methods.} We use activation patching~\cite{meng2022,zhang2024,heimersheim2024}, the logit lens~\cite{nostalgebraist2020}, direct logit attribution (DLA)~\cite{elhage2021}, probes with control tasks~\cite{hewitt2019,belinkov2022}, steering~\cite{turner2023} and sparse autoencoders~\cite{cunningham2024,rajamanoharan2024,gemmascope2}. Lens readings of multilingual models are contested~\cite{wendler2024,bayazit2026,panchal2026}, which is why every claim here rests on an intervention.
-
-% =====================================================================
 \section{Conclusion}
 
 Gemma-3-4B carries speaker gender and honorific status to the answer through the token that opens the clause, where one head, L25H6, reads both; single SAE features at these positions carry most of the effect. The model does not use kinship side at all and falls back on paternal terms. Its errors have different causes in each task, so each needs a different fix: gender errors start at names the model reads as nouns, honorific errors are readout failures that steering at layer 26 repairs, and kinship needs knowledge the model does not show. Testing whether L25H6 reads the clause opener in other agreement tasks, and whether a model trained for Indian languages computes kinship side, are the natural next steps.
@@ -297,10 +298,6 @@ Gemma-3-4B carries speaker gender and honorific status to the answer through the
 \section*{Limitations}
 
 We study one pretrained model on short templated prompts; in real text, speakers and addressees are introduced in many other ways. Hindi verbs have two gender forms, so our gender data is binary; the masculine default we find is itself a problem for speakers whose gender is unknown or non-binary. The noun-like-name finding comes from error analysis and rests on four names. We reduce honorific status to two classes of eight addressees, and familiarity norms differ between families and regions (we kept only items both authors agreed on). Kinship has 156 cue items and no mechanism to trace. Zero-ablation is off-distribution; mean-ablation gave a weaker masculine effect. We label SAE features from their top output tokens, which is suggestive only, and the 16k SAEs lose part of the effect at some sites (``all SAE'' vs.\ ``full resid.'' in Table~\ref{tab:sae}).
-
-\section*{Ethics statement}
-
-The defaults we localise are biases: an unnamed speaker is treated as male, and kinship terms default to the father's side. All names are common first names, not real people, and no human subjects took part beyond the two authors checking the data. We used an AI assistant (Claude) to help write the analysis code and to draft and edit this report; the authors are responsible for its content.
 
 \bibliography{references}
 
